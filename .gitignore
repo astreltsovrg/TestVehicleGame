@@ -1,0 +1,39 @@
+# UE5 Project gitignore
+
+# Build artifacts
+Binaries/
+Intermediate/
+DerivedDataCache/
+Build/
+
+# Saved data
+Saved/
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.sln
+*.suo
+*.user
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Content that might be large
+# Content/  # Uncomment if you don't want to track content
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.env
+.venv/
+
+# Logs
+*.log
+
+# Junctions to submodule (these are links, not real directories)
+Plugins/BlueprintMCP
+.mcp-servers
