@@ -1,0 +1,3 @@
+[submodule "Submodules/ue5-blueprint-mcp"]
+	path = Submodules/ue5-blueprint-mcp
+	url = git@github.com:astreltsovrg/ue5-blueprint-mcp.git
