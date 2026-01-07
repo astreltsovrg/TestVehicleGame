@@ -39,9 +39,9 @@ public:
 		const FGameplayEventData* TriggerEventData) override;
 
 protected:
-	/** Distance to teleport in units (10000 = 100 meters) */
+	/** Distance to teleport in units (1000 = 10 meters) */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Blink")
-	float BlinkDistance = 10000.0f;
+	float BlinkDistance = 1000.0f;
 
 	/** Energy cost to activate the ability */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Blink")
@@ -68,11 +68,11 @@ private:
 	FVector CalculateBlinkDestination(AActor* Vehicle, FVector& OutDirection) const;
 
 	/** Check if location is valid for teleport (no overlaps) */
-	bool IsLocationValid(UWorld* World, const FVector& Location, const FVector& VehicleExtent) const;
+	bool IsLocationValid(UWorld* World, const FVector& Location, const FVector& VehicleExtent, AActor* VehicleToIgnore) const;
 
 	/** Find nearest valid location along path using binary search */
 	FVector FindValidLocation(UWorld* World, const FVector& Start, const FVector& End,
-		const FVector& VehicleExtent) const;
+		const FVector& VehicleExtent, AActor* VehicleToIgnore) const;
 
 	/** Execute the blink teleport (client prediction or server authoritative) */
 	void ExecuteBlink(ATestVehicleGamePawn* VehiclePawn, const FVector& Destination,

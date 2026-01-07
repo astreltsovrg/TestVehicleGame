@@ -2,7 +2,10 @@
 
 #include "GE_BlinkCooldown.h"
 #include "GameplayEffectComponents/TargetTagsGameplayEffectComponent.h"
-#include "GameplayTagsManager.h"
+#include "NativeGameplayTags.h"
+
+// Define native gameplay tag - registered at static initialization, before CDO creation
+UE_DEFINE_GAMEPLAY_TAG_STATIC(TAG_Cooldown_Blink, "Cooldown.Blink");
 
 UGE_BlinkCooldown::UGE_BlinkCooldown()
 {
@@ -17,16 +20,11 @@ void UGE_BlinkCooldown::PostInitProperties()
 {
 	Super::PostInitProperties();
 
-	// Skip for CDO and archetypes
-	if (HasAnyFlags(RF_ClassDefaultObject | RF_ArchetypeObject))
-	{
-		return;
-	}
-
 	// Add TargetTags component to grant Cooldown.Blink tag
+	// Uses statically defined native tag (registered before CDO creation)
 	UTargetTagsGameplayEffectComponent& TargetTagsComponent = FindOrAddComponent<UTargetTagsGameplayEffectComponent>();
 
 	FInheritedTagContainer TagContainer;
-	TagContainer.AddTag(FGameplayTag::RequestGameplayTag(FName("Cooldown.Blink")));
+	TagContainer.AddTag(TAG_Cooldown_Blink);
 	TargetTagsComponent.SetAndApplyTargetTagChanges(TagContainer);
 }

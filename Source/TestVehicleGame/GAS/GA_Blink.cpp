@@ -56,6 +56,9 @@ void UGA_Blink::ActivateAbility(const FGameplayAbilitySpecHandle Handle,
 		return;
 	}
 
+	// Call Blueprint event for visual feedback
+	K2_ActivateAbility();
+
 	// Get vehicle pawn
 	ATestVehicleGamePawn* VehiclePawn = Cast<ATestVehicleGamePawn>(ActorInfo->AvatarActor.Get());
 	if (!VehiclePawn)
@@ -128,27 +131,36 @@ FVector UGA_Blink::CalculateBlinkDestination(AActor* Vehicle, FVector& OutDirect
 
 	FVector IdealEnd = Start + OutDirection * BlinkDistance;
 
-	// Get vehicle bounds for collision check
-	FVector Origin, Extent;
-	Vehicle->GetActorBounds(false, Origin, Extent);
-
 	UWorld* World = Vehicle->GetWorld();
 	if (!World)
 	{
 		return IdealEnd;
 	}
 
-	// Check if ideal location is valid
-	if (IsLocationValid(World, IdealEnd, Extent))
+	// Line trace to check for obstacles
+	FHitResult HitResult;
+	FCollisionQueryParams Params;
+	Params.AddIgnoredActor(Vehicle);
+	Params.bTraceComplex = false;
+
+	bool bHit = World->LineTraceSingleByChannel(
+		HitResult,
+		Start,
+		IdealEnd,
+		ECC_Visibility,
+		Params
+	);
+
+	if (bHit)
 	{
-		return IdealEnd;
+		// Stop before the obstacle with some offset
+		return HitResult.Location - OutDirection * CollisionCheckRadius;
 	}
 
-	// Find valid location along path using binary search
-	return FindValidLocation(World, Start, IdealEnd, Extent);
+	return IdealEnd;
 }
 
-bool UGA_Blink::IsLocationValid(UWorld* World, const FVector& Location, const FVector& VehicleExtent) const
+bool UGA_Blink::IsLocationValid(UWorld* World, const FVector& Location, const FVector& VehicleExtent, AActor* VehicleToIgnore) const
 {
 	if (!World)
 	{
@@ -158,19 +170,20 @@ bool UGA_Blink::IsLocationValid(UWorld* World, const FVector& Location, const FV
 	FCollisionShape Shape = FCollisionShape::MakeBox(VehicleExtent + FVector(CollisionCheckRadius));
 	FCollisionQueryParams Params;
 	Params.bTraceComplex = false;
+	Params.AddIgnoredActor(VehicleToIgnore);
 
 	// Check for blocking overlaps
 	return !World->OverlapBlockingTestByChannel(
 		Location,
 		FQuat::Identity,
-		ECC_Vehicle,
+		ECC_Visibility,  // Use Visibility channel - less restrictive than ECC_Vehicle
 		Shape,
 		Params
 	);
 }
 
 FVector UGA_Blink::FindValidLocation(UWorld* World, const FVector& Start,
-	const FVector& End, const FVector& VehicleExtent) const
+	const FVector& End, const FVector& VehicleExtent, AActor* VehicleToIgnore) const
 {
 	FVector LastValid = Start;
 	FVector TestPoint = End;
@@ -180,7 +193,7 @@ FVector UGA_Blink::FindValidLocation(UWorld* World, const FVector& Start,
 	{
 		FVector Mid = (LastValid + TestPoint) * 0.5f;
 
-		if (IsLocationValid(World, Mid, VehicleExtent))
+		if (IsLocationValid(World, Mid, VehicleExtent, VehicleToIgnore))
 		{
 			LastValid = Mid;
 		}
