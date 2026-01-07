@@ -7,6 +7,7 @@
 #include "GA_Blink.generated.h"
 
 class ATestVehicleGamePawn;
+class UParticleSystem;
 
 /**
  * Blink Ability - Instant Teleportation
@@ -63,7 +64,13 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Blink")
 	int32 MaxCollisionSearchSteps = 10;
 
+	/** Particle effect to spawn at start and end positions */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Blink|VFX")
+	TObjectPtr<UParticleSystem> BlinkVFX;
+
 private:
+	/** Spawn VFX at the given location */
+	void SpawnBlinkVFX(UWorld* World, const FVector& Location);
 	/** Calculate the blink destination with collision avoidance */
 	FVector CalculateBlinkDestination(AActor* Vehicle, FVector& OutDirection) const;
 
