@@ -8,6 +8,8 @@
 #include "Components/SkeletalMeshComponent.h"
 #include "PhysicsEngine/BodyInstance.h"
 #include "CollisionQueryParams.h"
+#include "Kismet/GameplayStatics.h"
+#include "Particles/ParticleSystem.h"
 
 UGA_Blink::UGA_Blink()
 {
@@ -102,8 +104,15 @@ void UGA_Blink::ActivateAbility(const FGameplayAbilitySpecHandle Handle,
 	// Deduct energy
 	DeductEnergy();
 
+	// Spawn VFX at start position (before teleport)
+	FVector StartLocation = VehiclePawn->GetActorLocation();
+	SpawnBlinkVFX(VehiclePawn->GetWorld(), StartLocation);
+
 	// Execute the blink (handles client prediction + server RPC)
 	ExecuteBlink(VehiclePawn, Destination, LinearVelocity, AngularVelocity);
+
+	// Spawn VFX at end position (after teleport)
+	SpawnBlinkVFX(VehiclePawn->GetWorld(), Destination);
 
 	// End ability (instant)
 	EndAbility(Handle, ActorInfo, ActivationInfo, true, false);
@@ -244,4 +253,23 @@ void UGA_Blink::DeductEnergy()
 		float NewEnergy = FMath::Max(0.0f, Attributes->GetEnergy() - EnergyCost);
 		Attributes->SetEnergy(NewEnergy);
 	}
+}
+
+void UGA_Blink::SpawnBlinkVFX(UWorld* World, const FVector& Location)
+{
+	if (!World || !BlinkVFX)
+	{
+		return;
+	}
+
+	UGameplayStatics::SpawnEmitterAtLocation(
+		World,
+		BlinkVFX,
+		Location,
+		FRotator::ZeroRotator,
+		FVector(1.0f),
+		true,  // bAutoDestroy
+		EPSCPoolMethod::None,
+		true   // bAutoActivateSystem
+	);
 }
