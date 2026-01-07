@@ -18,6 +18,7 @@
 #include "GAS/GA_NitroBoost.h"
 #include "GAS/GA_Shockwave.h"
 #include "GAS/GA_Blink.h"
+#include "GAS/GA_AfterburnerTrail.h"
 #include "PhysicsEngine/BodyInstance.h"
 #include "Abilities/GameplayAbility.h"
 #include "GameplayEffect.h"
@@ -118,6 +119,13 @@ void ATestVehicleGamePawn::SetupPlayerInputComponent(class UInputComponent* Play
 		{
 			EnhancedInputComponent->BindAction(BlinkAction, ETriggerEvent::Started, this, &ATestVehicleGamePawn::BlinkStarted);
 			EnhancedInputComponent->BindAction(BlinkAction, ETriggerEvent::Completed, this, &ATestVehicleGamePawn::BlinkCompleted);
+		}
+
+		// afterburner trail ability
+		if (AfterburnerAction)
+		{
+			EnhancedInputComponent->BindAction(AfterburnerAction, ETriggerEvent::Started, this, &ATestVehicleGamePawn::AfterburnerStarted);
+			EnhancedInputComponent->BindAction(AfterburnerAction, ETriggerEvent::Completed, this, &ATestVehicleGamePawn::AfterburnerCompleted);
 		}
 	}
 	else
@@ -388,6 +396,10 @@ void ATestVehicleGamePawn::GrantDefaultAbilitiesAndEffects()
 			{
 				InputID = BlinkInputID;
 			}
+			else if (AbilityClass->IsChildOf(UGA_AfterburnerTrail::StaticClass()))
+			{
+				InputID = AfterburnerInputID;
+			}
 
 			FGameplayAbilitySpec Spec(AbilityClass, 1, InputID, this);
 			AbilitySystemComponent->GiveAbility(Spec);
@@ -470,6 +482,7 @@ void ATestVehicleGamePawn::ApplyTorqueMultiplier(float Multiplier)
 	if (ChaosVehicleMovement && bBaseTorqueStored)
 	{
 		const float NewTorque = StoredBaseTorque * Multiplier;
+		UE_LOG(LogTemp, Warning, TEXT("ApplyTorqueMultiplier: Base=%.0f x %.2f = %.0f"), StoredBaseTorque, Multiplier, NewTorque);
 		ChaosVehicleMovement->SetMaxEngineTorque(NewTorque);
 	}
 }
@@ -478,6 +491,7 @@ void ATestVehicleGamePawn::RestoreBaseTorque()
 {
 	if (ChaosVehicleMovement && bBaseTorqueStored)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("RestoreBaseTorque: %.0f"), StoredBaseTorque);
 		ChaosVehicleMovement->SetMaxEngineTorque(StoredBaseTorque);
 	}
 }
@@ -499,6 +513,22 @@ void ATestVehicleGamePawn::BlinkCompleted(const FInputActionValue& Value)
 	if (AbilitySystemComponent)
 	{
 		AbilitySystemComponent->AbilityLocalInputReleased(BlinkInputID);
+	}
+}
+
+void ATestVehicleGamePawn::AfterburnerStarted(const FInputActionValue& Value)
+{
+	if (AbilitySystemComponent)
+	{
+		AbilitySystemComponent->AbilityLocalInputPressed(AfterburnerInputID);
+	}
+}
+
+void ATestVehicleGamePawn::AfterburnerCompleted(const FInputActionValue& Value)
+{
+	if (AbilitySystemComponent)
+	{
+		AbilitySystemComponent->AbilityLocalInputReleased(AfterburnerInputID);
 	}
 }
 

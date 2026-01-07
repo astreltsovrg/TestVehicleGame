@@ -104,6 +104,10 @@ protected:
 	UPROPERTY(EditAnywhere, Category="Input")
 	UInputAction* BlinkAction;
 
+	/** Afterburner Trail Action */
+	UPROPERTY(EditAnywhere, Category="Input")
+	UInputAction* AfterburnerAction;
+
 	/** Default abilities to grant on spawn */
 	UPROPERTY(EditDefaultsOnly, Category="GAS")
 	TArray<TSubclassOf<UGameplayAbility>> DefaultAbilities;
@@ -200,6 +204,12 @@ protected:
 	/** Handles blink input end */
 	void BlinkCompleted(const FInputActionValue& Value);
 
+	/** Handles afterburner input start */
+	void AfterburnerStarted(const FInputActionValue& Value);
+
+	/** Handles afterburner input end */
+	void AfterburnerCompleted(const FInputActionValue& Value);
+
 	/** Initialize the Ability System Component */
 	void InitializeAbilitySystem();
 
@@ -214,6 +224,9 @@ protected:
 
 	/** Input ID for blink ability binding */
 	static constexpr int32 BlinkInputID = 3;
+
+	/** Input ID for afterburner ability binding */
+	static constexpr int32 AfterburnerInputID = 4;
 
 public:
 
