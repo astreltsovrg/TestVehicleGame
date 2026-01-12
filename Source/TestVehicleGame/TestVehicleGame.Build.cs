@@ -16,11 +16,16 @@ public class TestVehicleGame : ModuleRules
 			"EnhancedInput",
 			"ChaosVehicles",
 			"PhysicsCore",
+			"Chaos",      // For FHeightField and Chaos physics types
+			"ChaosCore",  // For TAABB, TVector and other core Chaos types
+			"RHI",        // For FRHIResource
+			"RenderCore", // For BeginInitResource, FRenderResource
 			"UMG",
 			"Slate",
 			"GameplayAbilities",
 			"GameplayTags",
-			"GameplayTasks"
+			"GameplayTasks",
+			"AIModule"
 		});
 
 		PublicIncludePaths.AddRange(new string[] {
@@ -30,7 +35,8 @@ public class TestVehicleGame : ModuleRules
 			"TestVehicleGame/Variant_Offroad",
 			"TestVehicleGame/Variant_TimeTrial",
 			"TestVehicleGame/Variant_TimeTrial/UI",
-			"TestVehicleGame/GAS"
+			"TestVehicleGame/GAS",
+			"TestVehicleGame/AI"
 		});
 
 		PrivateDependencyModuleNames.AddRange(new string[] { });
