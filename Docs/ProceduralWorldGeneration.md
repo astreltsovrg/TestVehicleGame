@@ -3682,8 +3682,120 @@ void OnVoxelRemoved_Incremental(FIntVector VoxelCoord)
 | Tree | Probabilistic (3 samples) | Достаточно проверить корень |
 | Rock | Probabilistic (3 samples) | Простая форма |
 | Bush | Probabilistic (1 sample) | Мелкий объект |
-| Building | Full volume scan | Сложная форма, критично |
-| Bridge | Full volume scan | Игрок может быть на нём |
+| Small Building | Full volume scan | Сложная форма, критично |
+| **Large Building** | **Segmented** | Footprint > threshold |
+| **Bridge** | **Segmented** | Длинный объект |
+| **Wall** | **Segmented** | Линейный объект |
+
+**⚠️ EDGE CASE: Очень большие объекты**
+
+```
+Проблема:
+  Мост 100м длиной, footprint = 100×10×2 = 2000 вокселей
+  При взрыве под мостом → CalculateCurrentSupportVolume(2000 voxels) → SPIKE!
+
+  Большое здание 50×50м, footprint = 50×50×3 = 7500 вокселей
+  Несколько зданий + взрыв = массовый lag
+```
+
+```cpp
+// Правило: Для объектов с footprint > MAX_FULL_SCAN_VOXELS
+const int32 MAX_FULL_SCAN_VOXELS = 500;  // ~8×8×8 метров
+
+int32 CalculateSupportVolume_Smart(const FAnchoredObject& Obj)
+{
+    int32 FootprintVoxels = GetFootprintVoxelCount(Obj.SupportBounds);
+
+    // Маленькие объекты — full scan (точно)
+    if (FootprintVoxels <= MAX_FULL_SCAN_VOXELS)
+    {
+        return CalculateCurrentSupportVolume(Obj.SupportBounds);
+    }
+
+    // Большие объекты — сегментированный подход
+    return CalculateSupportVolume_Segmented(Obj);
+}
+
+// Вариант 1: Sampling для больших объектов
+int32 CalculateSupportVolume_Sampled(const FAnchoredObject& Obj)
+{
+    const int32 NumSamples = 20;  // Фиксированное число сэмплов
+    int32 SolidCount = 0;
+
+    for (int32 i = 0; i < NumSamples; i++)
+    {
+        // Равномерно распределённые точки по footprint
+        FVector SamplePos = GetStratifiedSamplePoint(Obj.SupportBounds, i, NumSamples);
+
+        if (IsVoxelSolid(WorldToVoxel(SamplePos)))
+            SolidCount++;
+    }
+
+    // Экстраполируем на весь объём
+    float SampleRatio = float(SolidCount) / float(NumSamples);
+    return FMath::RoundToInt(SampleRatio * Obj.OriginalSupportVolume);
+}
+
+// Вариант 2: Logical Segments для мостов/стен
+int32 CalculateSupportVolume_Segmented(const FAnchoredObject& Obj)
+{
+    // Разбиваем на логические сегменты (каждый < MAX_FULL_SCAN_VOXELS)
+    TArray<FBox> Segments = SplitIntoSegments(Obj.SupportBounds, MAX_FULL_SCAN_VOXELS);
+
+    int32 TotalSupport = 0;
+    int32 FailedSegments = 0;
+
+    for (const FBox& Segment : Segments)
+    {
+        int32 SegmentVolume = CalculateCurrentSupportVolume(Segment);
+        int32 SegmentOriginal = GetOriginalVolumeForSegment(Segment);
+
+        float SegmentRatio = float(SegmentVolume) / float(SegmentOriginal);
+
+        if (SegmentRatio < 0.3f)  // Сегмент потерял опору
+            FailedSegments++;
+
+        TotalSupport += SegmentVolume;
+    }
+
+    // Мост рушится если ≥2 смежных сегмента без опоры
+    // (центральная секция может висеть на краях)
+    if (Obj.Type == EAnchorType::Bridge && FailedSegments >= 2)
+    {
+        // Проверить смежность failed сегментов
+        if (HasAdjacentFailedSegments(Segments, FailedSegments))
+            return 0;  // Рушится
+    }
+
+    return TotalSupport;
+}
+```
+
+**Визуализация сегментного подхода для моста:**
+
+```
+Мост 100м, разбит на 10 сегментов по 10м:
+
+[Seg0][Seg1][Seg2][Seg3][Seg4][Seg5][Seg6][Seg7][Seg8][Seg9]
+  ██    ██    ██    ░░    ░░    ░░    ██    ██    ██    ██
+                    ↑↑    ↑↑    ↑↑
+                  Взрыв убрал опору
+
+██ = опора есть (support > 30%)
+░░ = опора потеряна (support < 30%)
+
+Правило для моста:
+  - 3 смежных сегмента без опоры → центр рушится
+  - Края могут оставаться (cantilever эффект ограничен)
+```
+
+**Сводка по размеру объекта:**
+
+| Footprint | Стратегия | Сложность | Точность |
+|-----------|-----------|-----------|----------|
+| < 500 voxels | Full scan | O(V) | 100% |
+| 500-5000 voxels | Sampled (20 points) | O(20) | ~95% |
+| > 5000 voxels | Segmented | O(V/segment × N) | 100% per segment |
 
 ---
 
