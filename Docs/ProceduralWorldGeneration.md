@@ -2,6 +2,78 @@
 
 Документ описывает архитектуру процедурной генерации мира в стиле Valheim/Enshrouded с использованием UE5 + VoxelPlugin2 + PCG.
 
+---
+
+## 🎯 World Assumptions (ОБЯЗАТЕЛЬНО К ПРОЧТЕНИЮ)
+
+**Этот раздел фиксирует ключевые архитектурные решения проекта. Все остальные разделы должны соответствовать этим выборам.**
+
+### Выбор #1: Тип мира
+
+| Вариант | Статус |
+|---------|--------|
+| Конечный мир (Valheim disk, ~10km) | ❌ НЕ ИСПОЛЬЗУЕМ |
+| **Бесконечный мир с eventual consistency** | ✅ ВЫБРАН |
+
+**Implications:**
+- Global preprocessing невозможен — мир бесконечен
+- Все системы должны работать инкрементально
+- Допускается eventual consistency (река может слегка измениться при исследовании upstream)
+
+### Выбор #2: Реки
+
+| Вариант | Статус |
+|---------|--------|
+| Физически корректная гидрология (accumulated flow, drainage) | ❌ Phase 2 / Nice-to-have |
+| **MVP: Эстетические реки (width ~ distance_from_source)** | ✅ ВЫБРАН для v1.0 |
+
+**Implications:**
+- Нет IncrementalRiverGraph в v1.0
+- Нет перерасчёта upstream
+- Фиксированный max_width = 30m
+- Река выглядит правдоподобно, но не симулирует реальную гидрологию
+
+### Выбор #3: Источник истины для высоты
+
+| Вариант | Статус |
+|---------|--------|
+| Runtime noise (height вычисляется каждый раз) | ❌ НЕ ИСПОЛЬЗУЕМ |
+| **Baked textures (noise → texture при стриминге региона)** | ✅ ВЫБРАН |
+
+**Implications:**
+- Height ВСЕГДА читается из R32_FLOAT texture
+- Noise используется только при baking, не в runtime
+- Modifiers (rivers, roads, settlements) тоже в texture
+- Один источник истины = нет рассинхрона
+
+### Выбор #4: NavMesh scope
+
+| Вариант | Статус |
+|---------|--------|
+| NavMesh для всего мира (terrain + structures) | ❌ НЕ ИСПОЛЬЗУЕМ |
+| **NavMesh только для structures/dungeons** | ✅ ВЫБРАН |
+
+**Implications:**
+- Open world terrain: steering behaviors + slope checks + raycasts
+- Звери: flocking + simple obstacle avoidance
+- NPC на дорогах: spline following + local avoidance
+- NavMesh строится только внутри зданий, пещер, данжей
+
+### Выбор #5: Terrain modification layers
+
+| Слой | Mutable? | Описание |
+|------|----------|----------|
+| Procedural base | ❌ Immutable | Seed-based terrain, roads, rivers |
+| Player delta | ✅ Mutable | Копание, строительство, терраформинг |
+
+**Implications:**
+- Road terrain mods = часть procedural layer, НЕ delta
+- Player НИКОГДА не может изменить procedural слой напрямую
+- Delta хранит только player actions
+- При загрузке: procedural regenerates + delta applies on top
+
+---
+
 ## Содержание
 
 1. [Обзор архитектуры](#обзор-архитектуры)
@@ -35,35 +107,41 @@
 
 ### Порядок генерации
 
-**Локальные структуры - чистые функции, глобальные - preprocessing:**
-```
-Height(x, y, seed, region) = BaseNoise(x, y, seed)          // чистая функция
-                           + SettlementInfluence(x, y, seed) // чистая функция
-                           - Region.RiverInfluence(x, y)     // pre-computed!
-
-Локальное (noise, settlements) - на лету
-Глобальное (реки 10+ км) - preprocessing при стриминге региона
-```
+**Всё запекается в текстуры при стриминге региона (см. World Assumptions #3):**
 
 ```
 World Seed
     │
-    ├─→ Region Streaming (async, ahead of player)
-    │     │
-    │     └─ PrecomputeRivers() - в background thread
-    │           ├─ Трассировка сплайнов (тяжёлая операция)
-    │           └─ Spatial index для distance queries
-    │
-    └─→ Chunk Generation (лениво, при приближении игрока)
+    └─→ Region Streaming (async, ahead of player)
           │
-          ├─ Height(x,y,seed,region):
-          │     ├─ BaseNoise (Perlin/FBM) - чистая функция
-          │     ├─ SettlementInfluence - чистая функция
-          │     └─ Region.RiverInfluence - O(1) distance query
+          ├─ 1. BAKING PHASE (background thread):
+          │     │
+          │     ├─ ComputeBaseNoise() → R32_FLOAT texture
+          │     │     └─ PerlinFBM + Domain Warping
+          │     │
+          │     ├─ ComputeRivers() → modify height texture
+          │     │     └─ Gradient descent, valley carving
+          │     │
+          │     ├─ ComputeSettlements() → modify height texture
+          │     │     └─ Plateau flattening
+          │     │
+          │     └─ ComputeRoads() → modify height texture
+          │           └─ Road bed flattening
           │
-          ├─ POIs - вычисляются из Settlement Grid
-          ├─ Roads - A* между POIs
-          └─ PCG Vegetation
+          └─ 2. RUNTIME PHASE (при приближении игрока):
+                │
+                ├─ Height = SampleTexture(RegionHeightMap, UV)
+                │     └─ ОДИН источник истины!
+                │
+                ├─ POIs - из Settlement Grid
+                └─ PCG Vegetation - из seed + height texture
+
+⚠️ ВАЖНО: В runtime НЕТ вычисления noise!
+   Height ВСЕГДА читается из baked texture.
+   Это гарантирует:
+   - Нет рассинхрона между системами
+   - Быстрый runtime (texture sample vs noise computation)
+   - Простой debug (можно визуализировать текстуру)
 ```
 
 ---
@@ -201,6 +279,15 @@ FMiningResult GetResourceAt(FVector WorldPos, int32 WorldSeed)
 
 ## Детерминированная генерация
 
+> **📋 TL;DR Decision**
+>
+> | Вопрос | Решение |
+> |--------|---------|
+> | Seed scope | Один seed = весь мир (terrain, POI, roads, resources) |
+> | Storage | Delta-only (только изменения игрока) |
+> | Runtime | Regenerate procedural + apply delta |
+> | Floating point | Avoid `fmod()`, use integer hash |
+
 ### Принцип: Seed = Мир
 
 ```
@@ -250,6 +337,15 @@ World Save File:
 
 ## Settlement Grid
 
+> **📋 TL;DR Decision**
+>
+> | Вопрос | Решение |
+> |--------|---------|
+> | Подход | Встроенные плато в terrain (не поиск плоских мест) |
+> | Биомы | ❌ НЕ в горах (Mountains), ❌ НЕ в воде |
+> | Спейсинг | ~2 км между потенциальными плато |
+> | Height flattening | Pre-baked в height texture (не runtime) |
+
 ### Проблема
 Классический подход (terrain → find flat spots → place village) ненадёжен - может не найти подходящие места.
 
@@ -257,19 +353,54 @@ World Save File:
 
 Генератор террейна создаёт плоские места каждые ~2 км - естественно, но гарантированно.
 
-```cpp
-float GetHeight(FVector2D Pos, int32 Seed)
-{
-    float BaseHeight = GetBaseNoise(Pos, Seed);
-    float SettlementInfluence = GetSettlementGridInfluence(Pos, Seed);
+**⚠️ ВАЖНО: Biome Restrictions**
 
+```cpp
+bool IsValidSettlementBiome(FVector2D Pos, int32 Seed)
+{
+    EBiome Biome = GetBiome(Pos, Seed);
+
+    // Settlement Grid НЕ работает в этих биомах:
+    switch (Biome)
+    {
+        case EBiome::Mountains:    return false;  // Слишком крутые склоны
+        case EBiome::DeepOcean:    return false;  // Под водой
+        case EBiome::Glacier:      return false;  // Непригодно для жизни
+        case EBiome::Volcano:      return false;  // Опасно
+        default:                   return true;
+    }
+}
+```
+
+**⚠️ ВАЖНО: Height Flattening - BAKED, не runtime!**
+
+```cpp
+// ❌ НЕПРАВИЛЬНО: Runtime вычисление (дорого!)
+float GetHeight_WRONG(FVector2D Pos, int32 Seed)
+{
     if (SettlementInfluence > 0.f)
     {
+        // GetLocalAverageHeight - O(N) samples, ДОРОГО!
         float LocalAverage = GetLocalAverageHeight(Pos, 50.f, Seed);
         return FMath::Lerp(BaseHeight, LocalAverage, SettlementInfluence);
     }
+}
 
-    return BaseHeight;
+// ✅ ПРАВИЛЬНО: Pre-baked в texture при стриминге региона
+void BakeSettlementPlateau(FRegionHeightTexture& HeightTex, FVector2D SettlementPos)
+{
+    const float PlateauRadius = 150.f;
+    float TargetHeight = SampleHeight(HeightTex, SettlementPos);  // Центр плато
+
+    // Bake в текстуру - один раз при загрузке региона
+    ForEachTexelInRadius(SettlementPos, PlateauRadius, [&](int32 X, int32 Y)
+    {
+        float Dist = GetDistanceToCenter(X, Y, SettlementPos);
+        float Influence = 1.f - FMath::Square(Dist / PlateauRadius);
+
+        float CurrentHeight = HeightTex.Get(X, Y);
+        HeightTex.Set(X, Y, FMath::Lerp(CurrentHeight, TargetHeight, Influence));
+    });
 }
 
 float GetSettlementGridInfluence(FVector2D Pos, int32 Seed)
@@ -475,6 +606,40 @@ void AssignSpecialRooms(FDungeonLayout& Layout)
 
 ## Дороги
 
+> **📋 TL;DR Decision**
+>
+> | Вопрос | Решение |
+> |--------|---------|
+> | Генерация | A* между POI с slope/water/biome penalties |
+> | Terrain modification | Baked в height texture (immutable) |
+> | Player interaction | Только декорации, НЕ terrain |
+> | Gateway resolution | 3-level: exact → sliding → terrain mod |
+
+**⚠️ КРИТИЧНО: Procedural vs Player Delta (см. World Assumptions #5)**
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              TERRAIN MODIFICATION LAYERS                          │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  Layer 1: PROCEDURAL (immutable, regenerates from seed)         │
+│    ├── Base terrain noise                                       │
+│    ├── Settlement plateaus                                      │
+│    ├── River valleys                                            │
+│    └── Road beds ← СЮДА ВХОДЯТ ДОРОГИ!                         │
+│                                                                 │
+│  Layer 2: PLAYER DELTA (mutable, saved to disk)                 │
+│    ├── Excavation (копание)                                     │
+│    ├── Construction foundations                                 │
+│    └── Terraforming                                             │
+│                                                                 │
+│  ⚠️ Player НИКОГДА не модифицирует Layer 1!                    │
+│     Road terrain mods = часть seed-based generation             │
+│     При reload: Layer 1 regenerates → Layer 2 applies on top    │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
 ### Граф дорог
 
 ```cpp
@@ -572,13 +737,63 @@ void ApplyRoadToTerrain(const TArray<FVector>& Spline)
 
 ## Реки
 
-### Ключевой принцип: Реки как чистые функции
+> **📋 TL;DR Decision**
+>
+> | Вопрос | Решение |
+> |--------|---------|
+> | Модель рек | MVP: Эстетические (width ~ distance_from_source) |
+> | Accumulated flow | ❌ НЕ в v1.0 (Phase 2) |
+> | Max river width | 30m (жёсткий clamp) |
+> | Preprocessing | Bake в texture при загрузке региона |
+> | Гидрологическая точность | Не требуется для gameplay |
+>
+> **Ключевой вопрос:** *Заметит ли игрок разницу между физически корректной гидрологией и эвристикой `width ~ distance`?*
+> **Ответ:** Нет. Для Valheim-style gameplay важна эстетика, не симуляция.
 
-**Проблема:** Если реки - отдельная структура данных (TArray<FRiverSpline>), то Height(x,y,seed) больше не чистая функция - нужно сначала "сгенерировать" реки.
+---
 
-**Решение:** River Grid - аналог Settlement Grid. Реки вычисляются на лету из (position, seed).
+### MVP: Эстетические реки (v1.0)
 
-### River Grid
+**Принцип:** Река выглядит правдоподобно, но НЕ симулирует реальную гидрологию.
+
+```cpp
+// ПРОСТАЯ МОДЕЛЬ: ширина зависит от расстояния от истока
+float GetRiverWidth(float DistanceFromSource)
+{
+    const float MinWidth = 3.f;     // Исток - ручей
+    const float MaxWidth = 30.f;    // ЖЁСТКИЙ CLAMP!
+    const float GrowthRate = 0.01f; // 1м ширины на каждые 100м длины
+
+    return FMath::Clamp(
+        MinWidth + DistanceFromSource * GrowthRate,
+        MinWidth,
+        MaxWidth
+    );
+}
+
+// НЕ НУЖНО:
+// - Accumulated flow
+// - Drainage basin calculation
+// - Incremental graph
+// - Upstream dependencies
+```
+
+**Почему это работает для gameplay:**
+
+| Физическая реальность | MVP эвристика | Разница для игрока |
+|----------------------|---------------|-------------------|
+| Река расширяется от притоков | Река расширяется от расстояния | ❌ Не заметит |
+| Объём воды = сумма upstream | Визуальная ширина | ❌ Не заметит |
+| Притоки увеличивают flow | Притоки просто пересекаются | ⚠️ Минимально |
+
+**Детерминизм сохраняется:**
+- `RiverSource(cell, seed)` → детерминированный исток
+- `RiverPath(source, seed)` → детерминированная трассировка вниз по градиенту
+- `RiverWidth(distance)` → детерминированная ширина
+
+---
+
+### River Grid (реализация MVP)
 
 ```
 Сетка истоков рек (каждые 4 км):
@@ -1227,6 +1442,16 @@ float SampleWithBorderBlend(FVector2D WorldPos, const TArray<FRegionDataTexture>
 - BaseHeight и Settlement - локальные, можно считать на лету
 - Rivers - глобальные (10+ км), preprocessing обязателен
 ```
+
+---
+
+## 🔮 Phase 2: Физически корректные реки (Nice-to-have)
+
+> ⚠️ **ВНИМАНИЕ: Этот раздел описывает сложную систему, НЕ НУЖНУЮ для v1.0!**
+>
+> MVP (выше) достаточен для gameplay. Этот раздел - референс на случай, если понадобится более реалистичная гидрология в будущем.
+>
+> **Не реализовывать без явного решения команды!**
 
 ### Слияние рек и накопление потока
 
@@ -2206,6 +2431,13 @@ float GetRiverDepth(FVector2D Pos, int32 Seed)
 
 ---
 
+> **📋 Конец Phase 2 секции**
+>
+> Выше описана сложная система гидрологии с accumulated flow, drainage estimation и защитой от "butterfly effect".
+> Для v1.0 используйте MVP подход из начала раздела "Реки".
+
+---
+
 ## Озёра и водопады
 
 ### Типы озёр
@@ -2308,6 +2540,16 @@ PoolDepth = DropHeight * 0.3;
 ---
 
 ## Бесконечный мир и регионы
+
+> **📋 TL;DR Decision**
+>
+> | Вопрос | Решение |
+> |--------|---------|
+> | World type | Бесконечный (см. World Assumptions #1) |
+> | Streaming unit | Region ~4x4 km |
+> | Inter-region roads | Gateways на границах (deterministic) |
+> | Pre-generation | Async при стриминге (height bake + rivers) |
+> | LOD | По расстоянию от игрока |
 
 ### Проблема
 Нельзя сгенерировать бесконечный граф дорог заранее.
@@ -2863,6 +3105,16 @@ void FVoxelChunk::OnPCGComplete()
   → Дерево падает под действием гравитации
 ```
 
+> **📋 TL;DR Decision: Anchoring System**
+>
+> | Вопрос | Решение |
+> |--------|---------|
+> | Подход | Reverse Lookup + Spatial Hash |
+> | Memory | O(N objects), НЕ O(V voxels) |
+> | Check trigger | Dirty flag + batched (100ms interval) |
+> | Support calculation | Probabilistic для деревьев, full для зданий |
+> | Physics throttling | Max 5 collapses/frame, queue with "shake" |
+
 **Решение: Anchoring System**
 
 ```cpp
@@ -3141,6 +3393,98 @@ public:
 // Игрок копает 50 вокселей подряд → 1 проверка вместо 50
 // Особенно важно для взрывов (много вокселей за кадр)
 ```
+
+**⚠️ Дополнительные оптимизации (для explosions/mass digging):**
+
+```cpp
+// Оптимизация 1: Кэш support volume
+struct FAnchoredObject_Cached
+{
+    // ... базовые поля ...
+
+    // Кэш для избежания пересчёта
+    int32 CachedSupportVolume = -1;  // -1 = dirty
+    float LastValidCheckTime = 0.f;
+    bool bPendingRecheck = false;
+
+    void InvalidateCache() { CachedSupportVolume = -1; bPendingRecheck = true; }
+
+    int32 GetSupportVolume(float CurrentTime)
+    {
+        // Если кэш валиден и проверяли недавно - используем кэш
+        if (CachedSupportVolume >= 0 && (CurrentTime - LastValidCheckTime) < 0.5f)
+            return CachedSupportVolume;
+
+        // Иначе пересчитываем
+        CachedSupportVolume = CalculateCurrentSupportVolume(SupportBounds);
+        LastValidCheckTime = CurrentTime;
+        return CachedSupportVolume;
+    }
+};
+
+// Оптимизация 2: Probabilistic check (для деревьев/простых объектов)
+// Деревьям достаточно 2-3 тестовых точек, не нужен full volume scan
+int32 CalculateSupportVolume_Probabilistic(const FAnchoredObject& Obj)
+{
+    if (Obj.Type == EAnchorType::Tree || Obj.Type == EAnchorType::Rock)
+    {
+        // Для деревьев: проверяем только корневую зону (2-3 точки)
+        const int32 NumSamples = 3;
+        int32 SolidCount = 0;
+
+        FVector Base = Obj.WorldPosition - FVector(0, 0, 10);  // Чуть ниже основания
+        for (int32 i = 0; i < NumSamples; i++)
+        {
+            // Случайные точки в радиусе 50см от центра
+            FVector SamplePos = Base + FVector(
+                FMath::RandRange(-50.f, 50.f),
+                FMath::RandRange(-50.f, 50.f),
+                0
+            );
+
+            if (IsVoxelSolid(WorldToVoxel(SamplePos)))
+                SolidCount++;
+        }
+
+        // Если 0 из 3 solid - падает. 1+ из 3 - стоит.
+        return (SolidCount > 0) ? Obj.OriginalSupportVolume : 0;
+    }
+
+    // Для зданий - full volume scan (точность важнее)
+    return CalculateCurrentSupportVolume(Obj.SupportBounds);
+}
+
+// Оптимизация 3: Incremental volume update (для частых изменений)
+void OnVoxelRemoved_Incremental(FIntVector VoxelCoord)
+{
+    for (FAnchoredObject_Cached* Obj : GetObjectsInBounds(VoxelCoord))
+    {
+        // Вместо полного пересчёта - декрементим кэшированный объём
+        if (Obj->CachedSupportVolume > 0)
+        {
+            Obj->CachedSupportVolume--;
+
+            // Быстрая проверка без полного rescan
+            float QuickRatio = float(Obj->CachedSupportVolume) / float(Obj->OriginalSupportVolume);
+            if (QuickRatio < Obj->MinSupportRequired)
+            {
+                // Только тогда делаем full recheck для подтверждения
+                Obj->InvalidateCache();
+            }
+        }
+    }
+}
+```
+
+**Выбор стратегии по типу объекта:**
+
+| Тип | CalculateSupportVolume | Почему |
+|-----|------------------------|--------|
+| Tree | Probabilistic (3 samples) | Достаточно проверить корень |
+| Rock | Probabilistic (3 samples) | Простая форма |
+| Bush | Probabilistic (1 sample) | Мелкий объект |
+| Building | Full volume scan | Сложная форма, критично |
+| Bridge | Full volume scan | Игрок может быть на нём |
 
 ---
 
@@ -3561,7 +3905,78 @@ bool IsForest = ForestFactor > 1.15f;
 
 ## Навигация (NavMesh)
 
-### Проблема NavMesh в воксельном мире
+> **📋 TL;DR Decision (см. World Assumptions #4)**
+>
+> | AI Type | Navigation Method | NavMesh? |
+> |---------|-------------------|----------|
+> | Звери в open world | Steering + slope checks + raycasts | ❌ НЕТ |
+> | NPC на дорогах | Spline following + local avoidance | ❌ НЕТ |
+> | Враги в open world | Simple raycasts + steering | ❌ НЕТ |
+> | AI в зданиях/данжах | NavMesh | ✅ ДА |
+> | AI в пещерах | NavMesh | ✅ ДА |
+>
+> **Принцип:** NavMesh = только enclosed spaces (структуры, данжи, пещеры).
+> Open world terrain НИКОГДА не использует NavMesh.
+
+**Почему НЕ NavMesh для open world:**
+
+```
+1. Terrain динамический (игрок копает) → постоянный rebuild
+2. Бесконечный мир → TilePoolSize overflow
+3. Звери НЕ нуждаются в точной навигации:
+   - Олень бежит от игрока → достаточно steering away
+   - Волк атакует → достаточно raycast к цели
+   - Птица летает → NavMesh вообще не применим
+4. NPC на дорогах → дороги уже есть как splines
+```
+
+**Что использовать вместо:**
+
+```cpp
+// Для зверей: Steering Behaviors
+FVector GetFleeDirection(APawn* Animal, AActor* Threat)
+{
+    FVector ToThreat = Threat->GetActorLocation() - Animal->GetActorLocation();
+    FVector FleeDir = -ToThreat.GetSafeNormal();
+
+    // Проверка проходимости (slope check)
+    FVector TargetPos = Animal->GetActorLocation() + FleeDir * 500.f;
+    float Slope = GetTerrainSlope(TargetPos);
+
+    if (Slope > 45.f)  // Слишком крутой склон
+        FleeDir = FindAlternativeDirection(Animal, FleeDir, Slope);
+
+    return FleeDir;
+}
+
+// Для NPC на дорогах: Spline Following
+void FollowRoad(ANPC* NPC, URoadSpline* Road)
+{
+    float Progress = Road->FindClosestPoint(NPC->GetActorLocation());
+    FVector NextPoint = Road->GetLocationAtProgress(Progress + 0.01f);
+    NPC->MoveToLocation(NextPoint);
+}
+
+// Для врагов: Simple Raycast
+bool CanReachTarget(APawn* Enemy, AActor* Target)
+{
+    FHitResult Hit;
+    FVector Start = Enemy->GetActorLocation();
+    FVector End = Target->GetActorLocation();
+
+    // Проверяем прямую видимость + slope
+    if (!GetWorld()->LineTraceSingleByChannel(Hit, Start, End, ECC_Visibility))
+    {
+        float Slope = GetTerrainSlope(End);
+        return Slope < 50.f;  // Враг может забраться
+    }
+    return false;
+}
+```
+
+---
+
+### Проблема NavMesh в воксельном мире (референс)
 
 ```
 Традиционный подход:
