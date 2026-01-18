@@ -349,6 +349,15 @@ void UHeightfieldMeshComponent::UpdateMeshRegion(int32 StartRow, int32 StartCol,
 	RebuildMesh();
 }
 
+void UHeightfieldMeshComponent::SetHeightmapTexture(UTexture2D* NewTexture)
+{
+	if (HeightmapTexture != NewTexture)
+	{
+		HeightmapTexture = NewTexture;
+		RebuildMesh();
+	}
+}
+
 void UHeightfieldMeshComponent::GetMeshData(
 	TArray<FVector>& OutVertices,
 	TArray<uint32>& OutIndices,

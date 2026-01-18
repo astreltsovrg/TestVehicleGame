@@ -4,7 +4,11 @@
 #include "TestVehicleGamePlayerController.h"
 #include "TestVehicleGamePawn.h"
 #include "TestVehicleGameUI.h"
+#include "UI/EnergyBarWidget.h"
+#include "UI/MainMenuWidget.h"
 #include "EnhancedInputSubsystems.h"
+#include "EnhancedInputComponent.h"
+#include "InputAction.h"
 #include "ChaosWheeledVehicleMovementComponent.h"
 #include "Blueprint/UserWidget.h"
 #include "TestVehicleGame.h"
@@ -52,6 +56,37 @@ void ATestVehicleGamePlayerController::BeginPlay()
 			UE_LOG(LogTestVehicleGame, Error, TEXT("Could not spawn vehicle UI widget."));
 
 		}
+
+		// spawn the main menu widget (hidden by default)
+		if (MainMenuWidgetClass)
+		{
+			MainMenuWidget = CreateWidget<UMainMenuWidget>(this, MainMenuWidgetClass);
+
+			if (MainMenuWidget)
+			{
+				MainMenuWidget->AddToViewport(100); // High ZOrder to be on top
+				MainMenuWidget->SetVisibility(ESlateVisibility::Collapsed);
+				MainMenuWidget->OnGameModeSelected.AddDynamic(this, &ATestVehicleGamePlayerController::OnGameModeSelected);
+			}
+			else
+			{
+				UE_LOG(LogTestVehicleGame, Error, TEXT("Could not spawn main menu widget."));
+			}
+		}
+
+		// spawn the energy bar widget
+		if (EnergyUIClass)
+		{
+			EnergyUI = CreateWidget<UEnergyBarWidget>(this, EnergyUIClass);
+			if (EnergyUI)
+			{
+				EnergyUI->AddToViewport();
+			}
+			else
+			{
+				UE_LOG(LogTestVehicleGame, Error, TEXT("Could not spawn energy bar widget."));
+			}
+		}
 	}
 }
 
@@ -79,6 +114,15 @@ void ATestVehicleGamePlayerController::SetupInputComponent()
 				}
 			}
 		}
+
+		// Bind menu toggle action
+		if (UEnhancedInputComponent* EnhancedInput = Cast<UEnhancedInputComponent>(InputComponent))
+		{
+			if (ToggleMenuAction)
+			{
+				EnhancedInput->BindAction(ToggleMenuAction, ETriggerEvent::Started, this, &ATestVehicleGamePlayerController::ToggleMainMenu);
+			}
+		}
 	}
 }
 
@@ -90,6 +134,12 @@ void ATestVehicleGamePlayerController::Tick(float Delta)
 	{
 		VehicleUI->UpdateSpeed(VehiclePawn->GetChaosVehicleMovement()->GetForwardSpeed());
 		VehicleUI->UpdateGear(VehiclePawn->GetChaosVehicleMovement()->GetCurrentGear());
+	}
+
+	// Update energy bar
+	if (IsValid(VehiclePawn) && IsValid(EnergyUI))
+	{
+		EnergyUI->UpdateEnergy(VehiclePawn->GetNitroFuel(), VehiclePawn->GetMaxNitroFuel());
 	}
 }
 
@@ -127,4 +177,47 @@ bool ATestVehicleGamePlayerController::ShouldUseTouchControls() const
 {
 	// are we on a mobile platform? Should we force touch?
 	return SVirtualJoystick::ShouldDisplayTouchInterface() || bForceTouchControls;
+}
+
+void ATestVehicleGamePlayerController::ToggleMainMenu()
+{
+	if (MainMenuWidget)
+	{
+		if (MainMenuWidget->IsMenuVisible())
+		{
+			MainMenuWidget->HideMenu();
+		}
+		else
+		{
+			MainMenuWidget->ShowMenu();
+		}
+	}
+}
+
+void ATestVehicleGamePlayerController::OnGameModeSelected(FName ModeName)
+{
+	// Open level based on selected mode
+	FString LevelPath;
+
+	if (ModeName == FName("FreeDrive"))
+	{
+		LevelPath = TEXT("/Game/VehicleTemplate/Maps/VehicleBasic");
+	}
+	else if (ModeName == FName("TimeTrial"))
+	{
+		LevelPath = TEXT("/Game/Variant_TimeTrial/Maps/Lvl_Timetrial");
+	}
+	else if (ModeName == FName("Offroad"))
+	{
+		LevelPath = TEXT("/Game/Variant_OffRoad/Maps/Lvl_Offroad");
+	}
+
+	if (!LevelPath.IsEmpty())
+	{
+		UGameplayStatics::OpenLevel(GetWorld(), *LevelPath);
+	}
+	else
+	{
+		UE_LOG(LogTestVehicleGame, Warning, TEXT("Unknown game mode selected: %s"), *ModeName.ToString());
+	}
 }

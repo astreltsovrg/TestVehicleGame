@@ -82,6 +82,9 @@ void UGA_NitroBoost::ActivateAbility(const FGameplayAbilitySpecHandle Handle,
 			World->GetTimerManager().SetTimer(EnergyCheckTimer, this, &UGA_NitroBoost::CheckEnergyLevel, 0.1f, true);
 		}
 	}
+
+	// Call Super to trigger Blueprint K2_ActivateAbility event
+	Super::ActivateAbility(Handle, ActorInfo, ActivationInfo, TriggerEventData);
 }
 
 void UGA_NitroBoost::InputReleased(const FGameplayAbilitySpecHandle Handle,

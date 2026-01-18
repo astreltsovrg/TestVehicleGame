@@ -22,6 +22,10 @@
 #include "PhysicsEngine/BodyInstance.h"
 #include "Abilities/GameplayAbility.h"
 #include "GameplayEffect.h"
+#include "Kismet/GameplayStatics.h"
+#include "Particles/ParticleSystem.h"
+#include "Camera/CameraShakeBase.h"
+#include "GameFramework/PlayerController.h"
 
 #define LOCTEXT_NAMESPACE "VehiclePawn"
 
@@ -137,6 +141,12 @@ void ATestVehicleGamePawn::SetupPlayerInputComponent(class UInputComponent* Play
 void ATestVehicleGamePawn::BeginPlay()
 {
 	Super::BeginPlay();
+
+	// Register for collision events (must be done in BeginPlay when World exists)
+	// This is required for Chaos physics to dispatch collision callbacks
+	// Note: WheeledVehiclePawn sets bNotifyRigidBodyCollision in constructor but doesn't
+	// register with PhysScene because World doesn't exist yet
+	GetMesh()->SetNotifyRigidBodyCollision(true);
 
 	// set up the flipped check timer
 	GetWorld()->GetTimerManager().SetTimer(FlipCheckTimer, this, &ATestVehicleGamePawn::FlippedCheck, FlipCheckTime, true);
@@ -579,6 +589,86 @@ void ATestVehicleGamePawn::PerformBlinkTeleport(const FVector& Destination,
 	{
 		VehicleMesh->WakeAllRigidBodies();
 	}
+}
+
+// ============================================================================
+// Collision Effects (Proper Physics Callback)
+// ============================================================================
+
+void ATestVehicleGamePawn::NotifyHit(UPrimitiveComponent* MyComp, AActor* Other, UPrimitiveComponent* OtherComp,
+	bool bSelfMoved, FVector HitLocation, FVector HitNormal, FVector NormalImpulse, const FHitResult& Hit)
+{
+	Super::NotifyHit(MyComp, Other, OtherComp, bSelfMoved, HitLocation, HitNormal, NormalImpulse, Hit);
+
+	if (!bEnableCollisionEffects)
+	{
+		return;
+	}
+
+	// Check cooldown to prevent effect spam
+	const float CurrentTime = GetWorld()->GetTimeSeconds();
+	if (CurrentTime - LastCollisionEffectTime < CollisionEffectCooldown)
+	{
+		return;
+	}
+
+	// Calculate impact speed from physics impulse
+	float ImpactSpeed = NormalImpulse.Size();
+
+	// Fallback to velocity if impulse is zero (shouldn't happen with proper registration)
+	if (ImpactSpeed < KINDA_SMALL_NUMBER && MyComp)
+	{
+		FVector RelVel = MyComp->GetComponentVelocity();
+		if (OtherComp)
+		{
+			RelVel -= OtherComp->GetComponentVelocity();
+		}
+		ImpactSpeed = FMath::Abs(FVector::DotProduct(RelVel, HitNormal));
+	}
+
+	// Check if impact exceeds threshold (default: 50 km/h = 1389 cm/s)
+	if (ImpactSpeed < CollisionSpeedThreshold)
+	{
+		return;
+	}
+
+	LastCollisionEffectTime = CurrentTime;
+
+	// Log with bone name for debugging damage system
+	UE_LOG(LogTemp, Warning, TEXT("Vehicle collision! Bone: %s, ImpactSpeed: %.0f, Location: %s"),
+		*Hit.MyBoneName.ToString(), ImpactSpeed, *HitLocation.ToString());
+
+	// Spawn particle effect at exact physics contact point
+	if (CollisionParticleEffect)
+	{
+		UGameplayStatics::SpawnEmitterAtLocation(
+			GetWorld(),
+			CollisionParticleEffect,
+			HitLocation,
+			HitNormal.Rotation(),
+			FVector(1.0f),
+			true,
+			EPSCPoolMethod::AutoRelease
+		);
+	}
+
+	// Play sound effect at contact point
+	if (CollisionSound)
+	{
+		UGameplayStatics::PlaySoundAtLocation(this, CollisionSound, HitLocation);
+	}
+
+	// Play camera shake
+	if (CollisionCameraShake)
+	{
+		if (APlayerController* PC = Cast<APlayerController>(GetController()))
+		{
+			PC->ClientStartCameraShake(CollisionCameraShake);
+		}
+	}
+
+	// Notify Blueprint for additional custom effects (damage, deformation)
+	OnCollisionEffectTriggered(HitLocation, HitNormal, ImpactSpeed);
 }
 
 #undef LOCTEXT_NAMESPACE

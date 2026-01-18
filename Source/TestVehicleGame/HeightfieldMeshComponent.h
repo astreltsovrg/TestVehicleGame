@@ -42,6 +42,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category="Mesh")
 	void UpdateMeshRegion(int32 StartRow, int32 StartCol, int32 NumRows, int32 NumCols);
 
+	/** Sets the heightmap texture and rebuilds the mesh */
+	UFUNCTION(BlueprintCallable, Category="Heightfield")
+	void SetHeightmapTexture(UTexture2D* NewTexture);
+
 	/** Get mesh vertex/index data for external use */
 	void GetMeshData(TArray<FVector>& OutVertices, TArray<uint32>& OutIndices, TArray<FVector>& OutNormals, TArray<FVector2D>& OutUVs) const;
 

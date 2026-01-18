@@ -4,18 +4,13 @@
 
 #include "CoreMinimal.h"
 #include "Components/PrimitiveComponent.h"
-#include "Chaos/ImplicitFwd.h"
+#include "Chaos/HeightField.h"
 #include "Chaos/PhysicalMaterials.h"
 
 #include "HeightfieldMeshCollisionComponent.generated.h"
 
 class UTexture2D;
 class UPhysicalMaterial;
-
-namespace Chaos
-{
-	class FHeightField;
-}
 
 /**
  * A component that creates heightfield collision from a BGRA8 texture.

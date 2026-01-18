@@ -7,8 +7,11 @@
 #include "TestVehicleGamePlayerController.generated.h"
 
 class UInputMappingContext;
+class UInputAction;
 class ATestVehicleGamePawn;
 class UTestVehicleGameUI;
+class UMainMenuWidget;
+class UEnergyBarWidget;
 
 /**
  *  Vehicle Player Controller class
@@ -65,7 +68,27 @@ protected:
 	/** Pointer to the UI widget */
 	UPROPERTY()
 	TObjectPtr<UTestVehicleGameUI> VehicleUI;
-		
+
+	/** Type of the Energy Bar UI to spawn */
+	UPROPERTY(EditAnywhere, Category="Vehicle|UI")
+	TSubclassOf<UEnergyBarWidget> EnergyUIClass;
+
+	/** Pointer to the Energy Bar widget */
+	UPROPERTY()
+	TObjectPtr<UEnergyBarWidget> EnergyUI;
+
+	/** Main menu widget class */
+	UPROPERTY(EditAnywhere, Category = "Menu")
+	TSubclassOf<UMainMenuWidget> MainMenuWidgetClass;
+
+	/** Pointer to the main menu widget */
+	UPROPERTY()
+	TObjectPtr<UMainMenuWidget> MainMenuWidget;
+
+	/** Input action for toggling main menu (Escape) */
+	UPROPERTY(EditAnywhere, Category = "Menu|Input")
+	TObjectPtr<UInputAction> ToggleMenuAction;
+
 protected:
 
 	/** Gameplay initialization */
@@ -90,4 +113,14 @@ protected:
 
 	/** Returns true if the player should use UMG touch controls */
 	bool ShouldUseTouchControls() const;
+
+public:
+	/** Toggle main menu visibility */
+	UFUNCTION(BlueprintCallable, Category = "Menu")
+	void ToggleMainMenu();
+
+protected:
+	/** Handle game mode selection from main menu */
+	UFUNCTION()
+	void OnGameModeSelected(FName ModeName);
 };

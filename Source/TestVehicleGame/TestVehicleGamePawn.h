@@ -15,6 +15,9 @@ class UAbilitySystemComponent;
 class UNitroAttributeSet;
 class UGameplayAbility;
 class UGameplayEffect;
+class UParticleSystem;
+class USoundBase;
+class UCameraShakeBase;
 struct FInputActionValue;
 
 /**
@@ -61,6 +64,9 @@ class ATestVehicleGamePawn : public AWheeledVehiclePawn, public IAbilitySystemIn
 
 	/** Whether we have cached the base torque */
 	bool bBaseTorqueStored = false;
+
+	/** Timestamp of last collision effect to prevent spam */
+	float LastCollisionEffectTime = 0.0f;
 
 protected:
 
@@ -132,6 +138,40 @@ protected:
 
 	/** Flip check timer */
 	FTimerHandle FlipCheckTimer;
+
+	// ===== Collision Effects =====
+
+	/** Particle effect to spawn on collision */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category="Collision Effects")
+	TObjectPtr<UParticleSystem> CollisionParticleEffect;
+
+	/** Sound to play on collision */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category="Collision Effects")
+	TObjectPtr<USoundBase> CollisionSound;
+
+	/** Minimum speed in cm/s to trigger collision effects (default: 50 km/h = 1389 cm/s) */
+	UPROPERTY(EditDefaultsOnly, Category="Collision Effects")
+	float CollisionSpeedThreshold = 1389.0f;
+
+	/** Cooldown between collision effects in seconds */
+	UPROPERTY(EditDefaultsOnly, Category="Collision Effects")
+	float CollisionEffectCooldown = 0.3f;
+
+	/** Camera shake to play on collision */
+	UPROPERTY(EditDefaultsOnly, Category="Collision Effects")
+	TSubclassOf<UCameraShakeBase> CollisionCameraShake;
+
+	/** Whether collision effects are enabled */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category="Collision Effects")
+	bool bEnableCollisionEffects = true;
+
+	/** Called when vehicle collides with something (proper physics callback) */
+	virtual void NotifyHit(UPrimitiveComponent* MyComp, AActor* Other, UPrimitiveComponent* OtherComp,
+		bool bSelfMoved, FVector HitLocation, FVector HitNormal, FVector NormalImpulse, const FHitResult& Hit) override;
+
+	/** Blueprint event called after collision effect is spawned */
+	UFUNCTION(BlueprintImplementableEvent, Category="Collision Effects")
+	void OnCollisionEffectTriggered(FVector ImpactLocation, FVector ImpactNormal, float ImpactSpeed);
 
 public:
 	ATestVehicleGamePawn();

@@ -56,6 +56,9 @@ void UGA_Shockwave::ActivateAbility(const FGameplayAbilitySpecHandle Handle,
 		return;
 	}
 
+	// Call Blueprint event K2_ActivateAbility for visual feedback
+	K2_ActivateAbility();
+
 	// Deduct energy
 	DeductEnergy();
 
