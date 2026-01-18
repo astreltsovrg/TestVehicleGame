@@ -5160,49 +5160,13 @@ class FAmphibianAI
 
 ## Итоговая архитектура
 
-### Гибридный подход: baked textures + preprocessing
+> 📋 **Каноническая диаграмма порядка генерации**: см. [Обзор архитектуры → Порядок генерации](#порядок-генерации)
 
-> ⚠️ **См. World Assumptions #3**: Height ВСЕГДА читается из R32_FLOAT texture, noise используется только при baking.
+### Дополнительные системы (не в основной диаграмме)
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    WORLD GENERATION                          │
-│           (Baking при стриминге, чтение в runtime)           │
-├─────────────────────────────────────────────────────────────┤
-│                                                             │
-│  World Seed (один int32)                                    │
-│       │                                                     │
-│       └─→ REGION STREAMING (async, ahead of player)        │
-│             │                                               │
-│             ├─ BakeHeightTexture() ─────────────────────┐  │
-│             │     │                                     │  │
-│             │     ├── PerlinFBM(pos, seed)  ← ТОЛЬКО   │  │
-│             │     │                           ПРИ BAKING│  │
-│             │     ├── + SettlementInfluence()          │  │
-│             │     └── → R32_FLOAT Texture (GPU+CPU)    │  │
-│             │                                           │  │
-│             ├─ PrecomputeRivers() ──────────────────────┤  │
-│             │     ├─ ComputeRiverSpline() - тяжёлая    │  │
-│             │     ├─ ClipToRegion()                    │  │
-│             │     └─ BuildSpatialIndex()               │  │
-│             │                                           │  │
-│             └─ BakeRiverValleyTexture() ────────────────┘  │
-│                   └── River carving → отдельная текстура   │
-│                                                             │
-├─────────────────────────────────────────────────────────────┤
-│                    RUNTIME (chunk generation)               │
-├─────────────────────────────────────────────────────────────┤
-│                                                             │
-│  GetHeight_Gameplay(x, y)  ← ЧТЕНИЕ ИЗ ТЕКСТУРЫ            │
-│       └── Region.HeightCache_CPU[UV]  [O(1) lookup]        │
-│                                                             │
-│  GetHeight_Render(x, y)    ← ЧТЕНИЕ ИЗ ТЕКСТУРЫ            │
-│       └── Gameplay - RiverValleyTexture[UV]                │
-│                                                             │
-│  ❌ НЕ ИСПОЛЬЗУЕТСЯ: PerlinFBM() в runtime                 │
-│                                                             │
-├─────────────────────────────────────────────────────────────┤
-│  POIs, Дороги (вычисляются лениво)                         │
+│  POIs, Дороги (вычисляются лениво, по запросу)             │
 ├─────────────────────────────────────────────────────────────┤
 │                                                             │
 │  GetPOIsInArea(bounds, seed) - чистая функция              │
@@ -5212,37 +5176,28 @@ class FAmphibianAI
 │  ComputeRoadBetween(A, B, seed) - чистая функция           │
 │       └── A* по GetHeight_Gameplay (из текстуры!)          │
 │                                                             │
-│  Regions (4×4 км):                                         │
-│       ├── Height + River texture baking (async)            │
-│       ├── Border Gateways                                  │
-│       └── Streaming/unloading                              │
-│                                                             │
 ├─────────────────────────────────────────────────────────────┤
-│                    PLAYER RUNTIME                            │
+│                    PLAYER MODIFICATIONS                      │
 ├─────────────────────────────────────────────────────────────┤
 │                                                             │
-│  Player moves:                                              │
-│    → Stream regions ahead (async texture baking)           │
-│    → Generate chunks (texture reads - O(1)!)               │
-│    → Unload distant regions                                │
-│                                                             │
-│  Player modifies:                                           │
+│  Player modifies terrain:                                   │
 │    → Store Delta (removed/added voxels)                    │
-│    → Store destroyed procedural objects                    │
-│    → Store player buildings                                │
+│    → Delta applies ON TOP of procedural layer              │
+│                                                             │
+│  Player places/destroys objects:                           │
+│    → Store destroyed procedural objects (IDs)              │
+│    → Store player buildings (position, type, rotation)     │
 │                                                             │
 ├─────────────────────────────────────────────────────────────┤
-│                    SAVE FILE                                 │
+│                    SAVE FILE (~1 MB)                         │
 ├─────────────────────────────────────────────────────────────┤
 │                                                             │
-│  WorldSeed: 12345 (4 bytes)                                │
-│  ModifiedChunks: ~500 KB (RLE compressed)                  │
-│  DestroyedObjects: ~24 KB                                  │
-│  PlayerObjects: ~100 KB                                    │
-│  ─────────────────────────────                             │
-│  TOTAL: ~1 MB                                              │
+│  WorldSeed: 12345                    (4 bytes)             │
+│  ModifiedChunks: RLE compressed      (~500 KB)             │
+│  DestroyedObjects: list of IDs       (~24 KB)              │
+│  PlayerObjects: position+type+rot    (~100 KB)             │
 │                                                             │
-│  Реки НЕ хранятся - preprocessing при загрузке региона!    │
+│  ⚠️ Реки НЕ хранятся — preprocessing при загрузке региона! │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -5263,12 +5218,16 @@ class FAmphibianAI
 
 ### Классификация операций
 
-| Операция | Тип | Когда вычисляется | Сложность |
-|----------|-----|-------------------|-----------|
-| BaseHeight | Чистая функция | Per-voxel | O(1) |
-| Settlement | Чистая функция | Per-voxel | O(1) |
-| **Rivers** | **Preprocessing** | **При стриминге региона** | **O(L) один раз** |
-| River query | Distance lookup | Per-voxel | O(1) |
+| Операция | Фаза | Когда вычисляется | Сложность |
+|----------|------|-------------------|-----------|
+| **BAKING PHASE** (при стриминге региона): |||
+| BaseHeight | Baking | Per-texel, один раз | O(noise) |
+| Settlement influence | Baking | Per-texel, один раз | O(1) |
+| Rivers | Preprocessing | До baking | O(L) один раз |
+| River carving | Baking | Per-texel | O(1) spatial query |
+| **RUNTIME** (чтение из текстур): |||
+| GetHeight_Gameplay | Texture read | Per-voxel | O(1) |
+| GetHeight_Render | Texture read | Per-voxel | O(1) |
 | POIs | Чистая функция | При необходимости | O(grid cells) |
 | Roads | Чистая функция | Лениво | O(A*) |
 
