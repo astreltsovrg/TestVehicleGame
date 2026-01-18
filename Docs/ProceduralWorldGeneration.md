@@ -850,7 +850,11 @@ float GetRiverValleyInfluence(FVector2D Pos, int32 Seed)
 
 ### Детерминированный сплайн реки
 
+> ⚠️ **Примечание**: Эта функция вызывается при **PREPROCESSING** региона, ДО baking текстуры.
+> Поэтому здесь допустимо вызывать PerlinFBM напрямую — текстура ещё не существует!
+
 ```cpp
+// PREPROCESSING ONLY — вызывается при стриминге региона
 FRiverSpline ComputeRiverSpline(FIntPoint Cell, int32 CellSeed, int32 WorldSeed)
 {
     FRiverSpline Result;
@@ -897,21 +901,23 @@ float GetHeight(FVector2D Pos, int32 Seed)
     // → GetRiverValleyInfluence → ... БЕСКОНЕЧНОСТЬ!
 }
 
-// ПРАВИЛЬНО - два слоя
-float GetBaseHeight(FVector2D Pos, int32 Seed)
+// ПРАВИЛЬНО - два слоя (используется при BAKING текстуры, НЕ в runtime!)
+// См. World Assumptions #3: runtime читает из baked texture
+float GetBaseHeight_ForBaking(FVector2D Pos, int32 Seed)
 {
     // Только noise, без рек и поселений
-    return PerlinFBM(Pos, Seed);
+    return PerlinFBM(Pos, Seed);  // ← Вызывается ТОЛЬКО при baking региона!
 }
 
-float GetFinalHeight(FVector2D Pos, int32 Seed)
+float GetFinalHeight_ForBaking(FVector2D Pos, int32 Seed)
 {
-    float Base = GetBaseHeight(Pos, Seed);
+    float Base = GetBaseHeight_ForBaking(Pos, Seed);
     float RiverValley = GetRiverValleyInfluence(Pos, Seed);  // Использует GetBaseHeight
     float Settlement = GetSettlementGridInfluence(Pos, Seed);
 
     return Base - RiverValley + Settlement;
 }
+// Результат записывается в R32_FLOAT texture → runtime читает ТОЛЬКО из неё
 ```
 
 ---
@@ -1582,20 +1588,22 @@ float SampleWithBorderBlend(FVector2D WorldPos, const TArray<FRegionDataTexture>
 └─────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────┐
-│  GetFinalHeight(pos, seed, region)                           │
+│  BAKING PHASE (при стриминге региона):                       │
+│  GetFinalHeight_ForBaking(pos, seed)                         │
 │       │                                                      │
-│       ├── GetBaseHeight(pos, seed)         [чистая функция]  │
-│       │     └── PerlinFBM + Domain Warping                   │
-│       │                                                      │
-│       ├── Region.GetRiverInfluence(pos)    [pre-computed]    │
-│       │     └── SpatialIndex distance query (O(1))           │
-│       │                                                      │
-│       └── GetSettlementInfluence(pos, seed) [чистая функция] │
-│             └── Settlement Grid                              │
+│       ├── PerlinFBM(pos, seed) + Domain Warping              │
+│       ├── + GetSettlementInfluence(pos, seed)                │
+│       ├── - Region.GetRiverInfluence(pos) [pre-computed]     │
+│       └── → R32_FLOAT Texture (GPU + CPU mirror)             │
+│                                                              │
+│  RUNTIME (chunk generation):                                 │
+│  GetHeight_Gameplay(pos)                                     │
+│       └── Region.HeightCache_CPU[UV]  ← O(1) texture read   │
 └──────────────────────────────────────────────────────────────┘
 
-Ключевой инсайт:
-- BaseHeight и Settlement - локальные, можно считать на лету
+Ключевой инсайт (см. World Assumptions #3):
+- PerlinFBM вызывается ТОЛЬКО при baking региона
+- Runtime читает ТОЛЬКО из baked texture (O(1) lookup)
 - Rivers - глобальные (10+ км), preprocessing обязателен
 ```
 
@@ -2422,22 +2430,37 @@ struct FTerrainTile
 **Семантика функций (важно!):**
 
 ```cpp
-// ✅ ПРАВИЛЬНЫЕ НАЗВАНИЯ:
-// Height_Gameplay = для AI, physics, placement (terrain solid surface)
-// Height_Render   = для visual mesh (с river carving)
+// ✅ ПРАВИЛЬНЫЕ НАЗВАНИЯ (согласно World Assumptions #3):
+// Height_Gameplay = terrain solid surface (для AI, physics, placement)
+// Height_Render   = visual mesh surface (с river carving)
 
-float GetHeight_Gameplay(FVector2D Pos, int32 Seed)
+// ─── BAKING PHASE (при стриминге региона) ───
+// Эти функции вызываются ТОЛЬКО при создании текстуры региона:
+
+float BakeHeight_Gameplay(FVector2D Pos, int32 Seed)
 {
-    // Для collision, AI, placement, physics queries
-    // НЕ включает river carving — это высота "земли"
-    return GetBaseHeight(Pos, Seed) + GetSettlementInfluence(Pos, Seed);
+    // Запекается в HeightTexture_Gameplay
+    return PerlinFBM(Pos, Seed) + GetSettlementInfluence(Pos, Seed);
 }
 
-float GetHeight_Render(FVector2D Pos, int32 Seed)
+float BakeHeight_Render(FVector2D Pos, int32 Seed)
 {
-    // Для terrain mesh generation (однократно при baking)
-    // Включает river valley carving для визуала
-    return GetHeight_Gameplay(Pos, Seed) - GetRiverValleyInfluence_Cached(Pos, Seed);
+    // Запекается в HeightTexture_Render (или отдельный RiverValley channel)
+    return BakeHeight_Gameplay(Pos, Seed) - GetRiverValleyInfluence_Cached(Pos, Seed);
+}
+
+// ─── RUNTIME (chunk generation, AI queries) ───
+// Runtime ВСЕГДА читает из baked texture, НЕ вычисляет noise!
+
+float GetHeight_Gameplay(FVector2D Pos)  // ← Нет Seed! Читаем из текстуры
+{
+    FVector2D UV = WorldToRegionUV(Pos);
+    return CurrentRegion->HeightCache_CPU.Sample(UV);  // O(1) lookup
+}
+
+float GetHeight_Render(FVector2D Pos)
+{
+    return GetHeight_Gameplay(Pos) - CurrentRegion->RiverValleyCache_CPU.Sample(UV);
 }
 ```
 
@@ -5137,35 +5160,46 @@ class FAmphibianAI
 
 ## Итоговая архитектура
 
-### Гибридный подход: чистые функции + preprocessing
+### Гибридный подход: baked textures + preprocessing
+
+> ⚠️ **См. World Assumptions #3**: Height ВСЕГДА читается из R32_FLOAT texture, noise используется только при baking.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                    WORLD GENERATION                          │
-│         (Локальное на лету, глобальное preprocessing)        │
+│           (Baking при стриминге, чтение в runtime)           │
 ├─────────────────────────────────────────────────────────────┤
 │                                                             │
 │  World Seed (один int32)                                    │
 │       │                                                     │
-│       ├─→ REGION STREAMING (async, ahead of player)        │
-│       │     │                                               │
-│       │     └─ PrecomputeRivers() - background thread       │
-│       │           ├─ ComputeRiverSpline() - тяжёлая O(L)   │
-│       │           ├─ ClipToRegion()                        │
-│       │           └─ BuildSpatialIndex()                   │
-│       │                                                     │
-│       └─→ CHUNK GENERATION (per-voxel, runtime)            │
+│       └─→ REGION STREAMING (async, ahead of player)        │
 │             │                                               │
-│             └─ GetFinalHeight(x, y, seed, region)          │
-│                   │                                         │
-│                   ├── GetBaseHeight(x, y, seed)            │
-│                   │     └── PerlinFBM [чистая функция]     │
-│                   │                                         │
-│                   ├── GetSettlementInfluence(x, y, seed)   │
-│                   │     └── Settlement Grid [чистая]       │
-│                   │                                         │
-│                   └── Region.GetRiverInfluence(x, y)       │
-│                         └── SpatialIndex [O(1) query]      │
+│             ├─ BakeHeightTexture() ─────────────────────┐  │
+│             │     │                                     │  │
+│             │     ├── PerlinFBM(pos, seed)  ← ТОЛЬКО   │  │
+│             │     │                           ПРИ BAKING│  │
+│             │     ├── + SettlementInfluence()          │  │
+│             │     └── → R32_FLOAT Texture (GPU+CPU)    │  │
+│             │                                           │  │
+│             ├─ PrecomputeRivers() ──────────────────────┤  │
+│             │     ├─ ComputeRiverSpline() - тяжёлая    │  │
+│             │     ├─ ClipToRegion()                    │  │
+│             │     └─ BuildSpatialIndex()               │  │
+│             │                                           │  │
+│             └─ BakeRiverValleyTexture() ────────────────┘  │
+│                   └── River carving → отдельная текстура   │
+│                                                             │
+├─────────────────────────────────────────────────────────────┤
+│                    RUNTIME (chunk generation)               │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  GetHeight_Gameplay(x, y)  ← ЧТЕНИЕ ИЗ ТЕКСТУРЫ            │
+│       └── Region.HeightCache_CPU[UV]  [O(1) lookup]        │
+│                                                             │
+│  GetHeight_Render(x, y)    ← ЧТЕНИЕ ИЗ ТЕКСТУРЫ            │
+│       └── Gameplay - RiverValleyTexture[UV]                │
+│                                                             │
+│  ❌ НЕ ИСПОЛЬЗУЕТСЯ: PerlinFBM() в runtime                 │
 │                                                             │
 ├─────────────────────────────────────────────────────────────┤
 │  POIs, Дороги (вычисляются лениво)                         │
@@ -5176,20 +5210,20 @@ class FAmphibianAI
 │       └── Dungeon placement → данжи                        │
 │                                                             │
 │  ComputeRoadBetween(A, B, seed) - чистая функция           │
-│       └── A* по GetFinalHeight                             │
+│       └── A* по GetHeight_Gameplay (из текстуры!)          │
 │                                                             │
 │  Regions (4×4 км):                                         │
-│       ├── River preprocessing (async)                      │
+│       ├── Height + River texture baking (async)            │
 │       ├── Border Gateways                                  │
 │       └── Streaming/unloading                              │
 │                                                             │
 ├─────────────────────────────────────────────────────────────┤
-│                    RUNTIME                                   │
+│                    PLAYER RUNTIME                            │
 ├─────────────────────────────────────────────────────────────┤
 │                                                             │
 │  Player moves:                                              │
-│    → Stream regions ahead (async river precompute)         │
-│    → Generate chunks (Height queries - fast!)              │
+│    → Stream regions ahead (async texture baking)           │
+│    → Generate chunks (texture reads - O(1)!)               │
 │    → Unload distant regions                                │
 │                                                             │
 │  Player modifies:                                           │
