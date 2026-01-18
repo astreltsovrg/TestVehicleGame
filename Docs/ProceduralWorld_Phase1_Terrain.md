@@ -11,9 +11,10 @@
 | ✅ Seed-based terrain | ❌ Реки |
 | ✅ Region streaming (4×4 км) | ❌ Деревни/settlements |
 | ✅ Height baking в текстуру | ❌ Дороги |
-| ✅ Базовые биомы (по высоте) | ❌ Данжи |
-| ✅ VoxelPlugin2 интеграция | ❌ PCG растительность |
-| ✅ Простой terrain material | ❌ Геологические слои/майнинг |
+| ✅ VoxelPlugin2 интеграция | ❌ Данжи |
+| ✅ Простейший материал (один цвет/текстура) | ❌ PCG растительность |
+| | ❌ Биомы |
+| | ❌ Геологические слои/майнинг |
 
 ---
 
@@ -38,19 +39,15 @@ World Seed (int32)
                 ├─ 1. Generate HeightTexture (512×512, R32_FLOAT)
                 │     └─ PerlinFBM(pos, seed) + Domain Warping
                 │
-                ├─ 2. Generate BiomeTexture (512×512, R8)
-                │     └─ BiomeFromHeight(height) — простая классификация
-                │
-                └─ 3. Copy to CPU cache (для gameplay queries)
-                      └─ HeightCache_CPU[], BiomeCache_CPU[]
+                └─ 2. Copy to CPU cache (для gameplay queries)
+                      └─ HeightCache_CPU[]
 
           └─→ RUNTIME (когда игрок в регионе)
                 │
                 ├─ VoxelPlugin2 читает HeightTexture
-                │     └─ SDF = height - sampleHeight(UV)
+                │     └─ SDF = WorldZ - SampledHeight
                 │
-                └─ Material читает BiomeTexture
-                      └─ Blend layers по биому
+                └─ Material — простейший (один цвет или debug визуализация)
 ```
 
 ---
@@ -127,21 +124,17 @@ class URegionData : public UObject
 
 public:
     FIntPoint Coord;
+    bool bIsReady = false;
 
-    // GPU textures (для VoxelPlugin и материала)
+    // GPU texture (для VoxelPlugin)
     UPROPERTY()
     UTexture2D* HeightTexture;  // R32_FLOAT, 512×512
 
-    UPROPERTY()
-    UTexture2D* BiomeTexture;   // R8, 512×512
-
     // CPU cache (для gameplay queries)
     TArray<float> HeightCache;   // 512×512 floats
-    TArray<uint8> BiomeCache;    // 512×512 bytes
 
     // Быстрый доступ к высоте для gameplay
     float GetHeight(FVector2D WorldPos) const;
-    uint8 GetBiome(FVector2D WorldPos) const;
 
 private:
     FVector2D WorldToUV(FVector2D WorldPos) const;
@@ -244,34 +237,7 @@ private:
 };
 ```
 
-### 4. Biome Classification (простая)
-
-```cpp
-UENUM(BlueprintType)
-enum class EBiome : uint8
-{
-    DeepWater = 0,    // < 0m
-    ShallowWater = 1, // 0-5m
-    Beach = 2,        // 5-10m
-    Plains = 3,       // 10-100m
-    Hills = 4,        // 100-300m
-    Mountains = 5,    // 300-500m
-    Peaks = 6         // > 500m
-};
-
-uint8 ClassifyBiome(float Height)
-{
-    if (Height < 0.f)   return (uint8)EBiome::DeepWater;
-    if (Height < 5.f)   return (uint8)EBiome::ShallowWater;
-    if (Height < 10.f)  return (uint8)EBiome::Beach;
-    if (Height < 100.f) return (uint8)EBiome::Plains;
-    if (Height < 300.f) return (uint8)EBiome::Hills;
-    if (Height < 500.f) return (uint8)EBiome::Mountains;
-    return (uint8)EBiome::Peaks;
-}
-```
-
-### 5. VoxelPlugin2 Integration
+### 4. VoxelPlugin2 Integration
 
 ```cpp
 // Voxel Graph node: Sample Region Height
@@ -293,31 +259,29 @@ SDF = WorldPosition.Z - TerrainHeight
 Output: SDF (negative = inside terrain, positive = air)
 ```
 
-### 6. Terrain Material (простой)
+### 5. Terrain Material (debug)
+
+Для Phase 1 используем простейший материал — визуализация высоты:
 
 ```hlsl
-// M_ProceduralTerrain - Material Graph или Custom Node
+// M_DebugTerrain — просто показывает высоту цветом
 
 float Height = WorldPosition.Z;
-float3 Normal = VertexNormal;
 
-// Простой height-based blend
-float BeachMask = saturate(1 - abs(Height - 7.5) / 5.0);
-float PlainsMask = saturate((Height - 10) / 50) * saturate((100 - Height) / 50);
-float RockMask = saturate((Height - 200) / 100);
-float SnowMask = saturate((Height - 400) / 100);
+// Gradient: синий (низко) → зелёный (средне) → белый (высоко)
+float NormalizedHeight = saturate(Height / 500.0);  // 0-500м → 0-1
 
-// Slope-based rock
-float Slope = 1 - Normal.Z;
-RockMask = max(RockMask, Slope > 0.5 ? 1 : 0);
+float3 Albedo = lerp(
+    float3(0.2, 0.3, 0.8),   // синий (низины)
+    float3(0.9, 0.9, 0.9),   // белый (вершины)
+    NormalizedHeight
+);
 
-// Blend textures
-float3 Albedo =
-    SandTexture * BeachMask +
-    GrassTexture * PlainsMask +
-    RockTexture * RockMask +
-    SnowTexture * SnowMask;
+// Или ещё проще — один цвет:
+// float3 Albedo = float3(0.5, 0.5, 0.5);  // серый
 ```
+
+**Цель:** видеть форму terrain, не тратить время на красивые материалы.
 
 ---
 
@@ -338,25 +302,14 @@ void URegionManager::LoadRegion(FIntPoint Coord)
         TArray<float> HeightData;
         FHeightGenerator::BakeRegionHeight(Coord, WorldSeed, HeightData);
 
-        // 2. Bake biome data (CPU)
-        TArray<uint8> BiomeData;
-        BiomeData.SetNum(512 * 512);
-        for (int32 i = 0; i < HeightData.Num(); i++)
-        {
-            BiomeData[i] = ClassifyBiome(HeightData[i]);
-        }
-
-        // 3. Transfer to game thread for GPU upload
-        AsyncTask(ENamedThreads::GameThread, [Region, HeightData = MoveTemp(HeightData),
-                                               BiomeData = MoveTemp(BiomeData)]()
+        // 2. Transfer to game thread for GPU upload
+        AsyncTask(ENamedThreads::GameThread, [Region, HeightData = MoveTemp(HeightData)]()
         {
             // CPU cache
             Region->HeightCache = HeightData;
-            Region->BiomeCache = BiomeData;
 
-            // Create GPU textures
+            // Create GPU texture
             Region->HeightTexture = CreateTexture2D(512, 512, PF_R32_FLOAT, HeightData);
-            Region->BiomeTexture = CreateTexture2D(512, 512, PF_R8, BiomeData);
 
             // Mark region as ready
             Region->bIsReady = true;
@@ -375,14 +328,15 @@ void URegionManager::LoadRegion(FIntPoint Coord)
 2. ✅ Terrain генерируется вокруг игрока
 3. ✅ При движении — новые регионы подгружаются, старые выгружаются
 4. ✅ Один и тот же seed = один и тот же terrain
-5. ✅ Разные высоты = разные текстуры (песок, трава, камень, снег)
+5. ✅ Debug материал показывает форму terrain
 
 **Terrain выглядит как:**
 - Холмы и горы (Perlin noise)
 - Органичные формы (domain warping)
-- Базовое текстурирование по высоте/наклону
+- Однотонный/gradient цвет (debug визуализация)
 
 **Чего НЕТ (Phase 2+):**
+- Биомов и красивых материалов
 - Рек и озёр
 - Деревьев и растительности
 - Деревень и дорог
@@ -397,7 +351,7 @@ void URegionManager::LoadRegion(FIntPoint Coord)
 1. **Determinism test**: Загрузить регион дважды с одним seed → побитовое совпадение
 2. **Streaming test**: Ездить по миру 10 минут → нет memory leaks, нет hitches
 3. **Performance test**: Baking одного региона < 500ms на background thread
-4. **Visual test**: Terrain выглядит "природно", нет явных артефактов на границах
+4. **Visual test**: Terrain имеет плавные формы, нет артефактов на границах регионов
 
 ### Метрики
 
@@ -405,9 +359,8 @@ void URegionManager::LoadRegion(FIntPoint Coord)
 |---------|--------|
 | Region bake time | < 500ms |
 | HeightTexture memory | 1 MB per region (512² × 4 bytes) |
-| BiomeTexture memory | 256 KB per region (512² × 1 byte) |
 | Max loaded regions | ~25 (5×5 grid) |
-| Total terrain memory | ~32 MB |
+| Total terrain memory | ~25 MB |
 
 ---
 
@@ -415,7 +368,8 @@ void URegionManager::LoadRegion(FIntPoint Coord)
 
 Когда Phase 1 стабилен:
 
-1. **Phase 2a**: Добавить реки (river preprocessing, valley carving)
-2. **Phase 2b**: Добавить PCG растительность
-3. **Phase 2c**: Добавить settlements и дороги
-4. **Phase 3**: Добавить данжи и геологические слои
+1. **Phase 1b**: Добавить биомы и terrain материалы
+2. **Phase 2a**: Добавить реки (river preprocessing, valley carving)
+3. **Phase 2b**: Добавить PCG растительность
+4. **Phase 2c**: Добавить settlements и дороги
+5. **Phase 3**: Добавить данжи и геологические слои
