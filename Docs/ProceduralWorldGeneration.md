@@ -3253,12 +3253,204 @@ void CleanupDistantRiverCache(FVector2D PlayerPos, float MaxDistance);
 
 ---
 
+## Система лесов (Forest Density)
+
+> 📋 **TL;DR**: Лес — это НЕ биом, а маска плотности поверх любого биома.
+> Биом определяет ЧТО растёт (сосны/берёзы), ForestFactor определяет ГДЕ (густо/редко).
+
+### Архитектура (Valheim-style)
+
+```
+┌────────────────────────────────────────────────────────────┐
+│                    VEGETATION SPAWN                         │
+├────────────────────────────────────────────────────────────┤
+│                                                            │
+│   Biome (Meadows, BlackForest, etc.)                       │
+│       │                                                    │
+│       └─→ Определяет КАКИЕ деревья:                       │
+│             Meadows     → Берёзы, дубы                     │
+│             BlackForest → Сосны, ели                       │
+│             Swamp       → Мёртвые деревья                  │
+│                                                            │
+│   ForestFactor (FBM noise 0..2)                            │
+│       │                                                    │
+│       └─→ Определяет ГДЕ деревья:                         │
+│             < 1.0  → Густой лес                            │
+│             1.0-1.15 → Опушка / редкий лес                │
+│             > 1.15 → Поляна / открытое место              │
+│                                                            │
+│   Результат = Biome × ForestFactor                         │
+│       Meadows + ForestFactor<1.0 = Густой берёзовый лес   │
+│       Meadows + ForestFactor>1.15 = Поляна с цветами      │
+│                                                            │
+└────────────────────────────────────────────────────────────┘
+```
+
+### ForestFactor — вычисление
+
+```cpp
+// Отдельный noise слой, независимый от terrain height
+float GetForestFactor(FVector2D Pos, int32 Seed)
+{
+    // FBM с низкой частотой — создаёт большие "пятна" леса
+    const float Frequency = 0.004f;  // ~250м между центрами пятен
+    const int32 Octaves = 3;
+
+    float Factor = FBM(Pos * Frequency, Octaves, Seed + 7777);
+
+    // Нормализуем в диапазон 0..2
+    return Factor + 1.0f;
+}
+
+bool IsInForest(FVector2D Pos, int32 Seed)
+{
+    return GetForestFactor(Pos, Seed) < 1.15f;
+}
+
+bool IsInDenseForest(FVector2D Pos, int32 Seed)
+{
+    return GetForestFactor(Pos, Seed) < 1.0f;
+}
+
+bool IsClearing(FVector2D Pos, int32 Seed)
+{
+    return GetForestFactor(Pos, Seed) > 1.15f;
+}
+```
+
+### Vegetation Rules
+
+```cpp
+USTRUCT()
+struct FVegetationRule
+{
+    // Идентификация
+    FName VegetationID;           // "Pine_Large", "Birch_Small", "Flower_Yellow"
+    TSoftObjectPtr<UStaticMesh> Mesh;
+
+    // Биом ограничения
+    TSet<EBiome> AllowedBiomes;   // В каких биомах спавнится
+
+    // Forest Factor ограничения
+    bool bUseForestFactor;        // Учитывать ли ForestFactor
+    float ForestFactorMin;        // Минимальный ForestFactor
+    float ForestFactorMax;        // Максимальный ForestFactor
+
+    // Плотность
+    float Density;                // Объектов на м²
+
+    // Размещение
+    float MinSlope;               // Минимальный наклон (0 = плоско)
+    float MaxSlope;               // Максимальный наклон (1 = вертикально)
+    float MinAltitude;            // Минимальная высота
+    float MaxAltitude;            // Максимальная высота
+};
+```
+
+### Примеры правил
+
+| Vegetation | Biomes | ForestFactor | Описание |
+|------------|--------|--------------|----------|
+| **Pine_Large** | BlackForest | 0 - 1.1 | Только в густом лесу |
+| **Pine_Small** | BlackForest | 0 - 1.3 | Лес + опушка |
+| **Birch_Large** | Meadows | 0 - 1.0 | В лесных участках лугов |
+| **Birch_Small** | Meadows | 0.8 - 1.5 | На опушках |
+| **Oak** | Plains | 0 - 0.9 | Редкие рощи в степи |
+| **DeadTree** | Swamp | 0 - 2.0 | Везде в болоте (игнор ForestFactor) |
+| **Flower_Yellow** | Meadows | 1.0 - 2.0 | Только на полянах |
+| **Mushroom** | BlackForest | 0 - 1.0 | Только в тени леса |
+| **Rock_Large** | ALL | (ignored) | Везде, лес не важен |
+| **Bush** | Meadows, Plains | 0.5 - 1.5 | Опушки и редколесье |
+
+### Визуализация
+
+```
+Meadows биом (один seed):
+
+ForestFactor noise:          Результат размещения:
+┌─────────────────────┐      ┌─────────────────────┐
+│  ░░░▓▓▓▓▓░░░   ░░▓▓▓│      │  🌸🌲🌲🌲🌲🌸🌸   🌸🌲🌲│
+│ ░░▓▓▓▓▓▓▓▓░░   ░▓▓▓▓│      │ 🌸🌲🌲🌲🌲🌲🌲🌲🌸   🌲🌲🌲🌲│
+│  ░░▓▓▓▓▓░░░     ░░▓░│      │  🌸🌲🌲🌲🌲🌸🌸     🌸🌲│
+│    ░░░░░           │      │    🌸🌸🌸🌸🌸          │
+└─────────────────────┘      └─────────────────────┘
+▓ = ForestFactor < 1.15      🌲 = Берёза (в лесу)
+░ = ForestFactor > 1.15      🌸 = Цветы (на поляне)
+```
+
+### Важно для геймплея
+
+```cpp
+// ForestFactor влияет не только на растительность:
+
+// 1. Видимость / Stealth
+float GetVisibilityModifier(FVector Pos)
+{
+    float Forest = GetForestFactor(Pos.XY(), WorldSeed);
+    if (Forest < 0.8f) return 0.3f;   // Густой лес — плохая видимость
+    if (Forest < 1.15f) return 0.6f;  // Редкий лес
+    return 1.0f;                       // Открытое место
+}
+
+// 2. Скорость транспорта
+float GetVehicleSpeedModifier(FVector Pos)
+{
+    if (!IsOnRoad(Pos))
+    {
+        float Forest = GetForestFactor(Pos.XY(), WorldSeed);
+        if (Forest < 1.0f) return 0.4f;   // Густой лес — медленно
+        if (Forest < 1.15f) return 0.7f;  // Редкий лес
+    }
+    return 1.0f;
+}
+
+// 3. Settlement placement — предпочитают поляны
+float GetSettlementSuitability(FVector2D Pos)
+{
+    float Forest = GetForestFactor(Pos, WorldSeed);
+    if (Forest < 1.0f) return 0.1f;   // В густом лесу не строят
+    if (Forest > 1.3f) return 1.0f;   // Поляна — идеально
+    return 0.5f;                       // Опушка — возможно
+}
+```
+
+### Baking vs Runtime
+
+| Операция | Когда | Метод |
+|----------|-------|-------|
+| ForestFactor computation | Baking | Запекается в отдельную R8 текстуру (или канал BiomeTexture) |
+| Vegetation spawn decision | Baking | PCG читает ForestFactor из текстуры |
+| Visibility/Speed queries | Runtime | Читаем из ForestTexture (O(1)) |
+
+```cpp
+// При baking региона:
+void BakeForestTexture(FIntPoint RegionCoord, int32 Seed, TArray<uint8>& OutData)
+{
+    OutData.SetNum(512 * 512);
+
+    for (int32 Y = 0; Y < 512; Y++)
+    {
+        for (int32 X = 0; X < 512; X++)
+        {
+            FVector2D WorldPos = RegionCoordToWorld(RegionCoord, X, Y);
+            float Factor = GetForestFactor(WorldPos, Seed);
+
+            // Encode 0..2 → 0..255
+            OutData[Y * 512 + X] = FMath::Clamp(Factor * 127.5f, 0.f, 255.f);
+        }
+    }
+}
+```
+
+---
+
 ## PCG для растительности
 
-### Двухслойная система
+### Трёхслойная система
 
 ```
 Voxel Graph: Noise → Terrain GEOMETRY (форма)
+ForestFactor: Noise → Density MASK (где густо/редко)
 PCG:         Terrain → Object PLACEMENT (деревья, трава)
 ```
 
