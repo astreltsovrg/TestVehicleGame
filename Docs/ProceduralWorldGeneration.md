@@ -974,6 +974,82 @@ private:
 };
 ```
 
+**⚠️ АРХИТЕКТУРНЫЙ ЭЛЕМЕНТ: RiverSplineCache (избежание O(N²))**
+
+```
+Проблема без кэша:
+
+Region A загружается:
+  → FindRiverSources() находит River#1, River#2
+  → ComputeRiverSpline(River#1) — 500ms
+  → ComputeRiverSpline(River#2) — 300ms
+
+Region B загружается (соседний):
+  → FindRiverSources() находит River#1, River#3
+  → ComputeRiverSpline(River#1) — 500ms ← ДУБЛИКАТ!
+  → ComputeRiverSpline(River#3) — 400ms
+
+Без кэша: одна река пересчитывается для каждого региона, через который течёт.
+River#1 течёт через 5 регионов = 5 × 500ms = 2.5 секунды wasted work.
+```
+
+```cpp
+// АРХИТЕКТУРНЫЙ ЭЛЕМЕНТ (не просто оптимизация!)
+class FRiverSplineCache
+{
+    // Key = River source cell (детерминированный из seed)
+    TMap<FIntPoint, FRiverSpline> CachedSplines;
+    FCriticalSection CacheLock;  // Thread-safe для async loading
+
+public:
+    // Вызывается из FWorldRegion::PrecomputeRivers()
+    FRiverSpline GetOrCompute(FIntPoint SourceCell, int32 WorldSeed)
+    {
+        FScopeLock Lock(&CacheLock);
+
+        // Уже посчитали для другого региона?
+        if (FRiverSpline* Cached = CachedSplines.Find(SourceCell))
+        {
+            return *Cached;  // O(1) - бесплатно!
+        }
+
+        // Первый раз — считаем и кэшируем
+        int32 CellSeed = HashCombine(HashCombine(WorldSeed, SourceCell.X), SourceCell.Y);
+        FRiverSpline Spline = ComputeRiverSpline(SourceCell, CellSeed, WorldSeed);
+
+        CachedSplines.Add(SourceCell, Spline);
+        return Spline;
+    }
+
+    // При unload далёких регионов — можно чистить
+    void PurgeUnusedSplines(const TSet<FIntPoint>& ActiveRegions)
+    {
+        // Оставляем только реки, проходящие через активные регионы
+        // (опционально, для экономии памяти)
+    }
+};
+
+// Глобальный кэш (или per-world)
+static FRiverSplineCache GRiverSplineCache;
+```
+
+**Важно:**
+```
+Cache is performance-only, does NOT affect determinism.
+
+Один и тот же seed + source cell = один и тот же spline.
+Кэш только избегает повторного вычисления.
+При очистке кэша — результат генерации не меняется.
+```
+
+**Сложность с кэшем vs без:**
+
+| Сценарий | Без кэша | С кэшем |
+|----------|----------|---------|
+| 5 регионов, 1 река через все | 5 × 500ms = 2.5s | 500ms |
+| 25 регионов, 10 рек | ~50 × 400ms = 20s | ~10 × 400ms = 4s |
+| Экономия | — | **5x faster** |
+
 **Почему preprocessing лучше:**
 
 | Критерий | Lazy Compute | Region Preprocessing |
@@ -1275,6 +1351,86 @@ vs
 - Settlement influence требует детализации отдельных зданий
 
 **Рекомендация:** Начинать с 512×512, увеличивать только для регионов с реками/дорогами.
+
+**⚠️ КРИТИЧНО: CPU Readback невозможен/дорог!**
+
+R32_FLOAT texture живёт на GPU. Вызов `ReadPixels()` для CPU-доступа:
+- Требует GPU→CPU transfer (stall)
+- Latency 1-2 frames
+- Для реалтайм queries — неприемлемо
+
+```cpp
+// ❌ НЕПРАВИЛЬНО: ReadPixels каждый кадр
+float GetHeight_WRONG(FVector2D Pos)
+{
+    // GPU stall! 1-5ms per call!
+    TArray<FFloat16Color> Pixels;
+    HeightTexture->Source.GetMipData(Pixels, 0);
+    return SampleFromPixels(Pixels, Pos);  // 💥 LAG
+}
+```
+
+**Где это аукнется:**
+- `GetSurfaceHeight()` для gameplay (placement, grounding)
+- AI height queries (pathfinding, slope checks)
+- Physics queries (collision with terrain)
+- PCG placement logic вне Voxel Graph
+
+**Решение: Параллельный CPU-side кэш**
+
+```cpp
+// Архитектура: GPU texture + CPU mirror
+class FRegionHeightData
+{
+    // GPU-side: для Voxel Graph rendering
+    UTexture2D* HeightTexture_GPU;  // PF_R32_FLOAT
+
+    // CPU-side: для gameplay queries
+    TArray<float> HeightCache_CPU;  // Копия данных
+    int32 CacheResolution;          // Может быть ниже чем GPU (256 vs 512)
+
+public:
+    // При baking — заполняем ОБА
+    void BakeHeight(...)
+    {
+        // 1. Bake в GPU texture (для рендера)
+        BakeToGPUTexture(HeightTexture_GPU, ...);
+
+        // 2. Параллельно храним в CPU array (для queries)
+        HeightCache_CPU.SetNum(CacheResolution * CacheResolution);
+        for (int32 Y = 0; Y < CacheResolution; Y++)
+        for (int32 X = 0; X < CacheResolution; X++)
+        {
+            HeightCache_CPU[Y * CacheResolution + X] = ComputeHeight(X, Y);
+        }
+    }
+
+    // ✅ ПРАВИЛЬНО: CPU query из кэша
+    float GetHeight_Gameplay(FVector2D WorldPos) const
+    {
+        FVector2D UV = WorldToRegionUV(WorldPos);
+        return BilinearSample(HeightCache_CPU, UV, CacheResolution);
+    }
+};
+```
+
+**Сводка по height queries:**
+
+| Контекст | Источник | Latency |
+|----------|----------|---------|
+| Voxel Graph (render) | GPU R32 texture | 0 (GPU-side) |
+| Gameplay (AI, physics) | CPU HeightCache | ~0.01ms |
+| Editor tools | CPU HeightCache | ~0.01ms |
+| ReadPixels (избегать!) | GPU→CPU transfer | 1-5ms + stall |
+
+**Память CPU кэша:**
+```
+512×512 region × 4 bytes = 1 MB per region
+25 regions = 25 MB RAM (приемлемо)
+
+Можно снизить до 256×256 для gameplay (0.25 MB per region)
+— точности хватит для AI и physics
+```
 
 **Детали реализации Parameter Texture:**
 
@@ -2263,26 +2419,69 @@ struct FTerrainTile
 
 #### Решение 3: Двухуровневый Height
 
+**Семантика функций (важно!):**
+
 ```cpp
-// Разные функции для разных целей
-float GetHeight_Fast(FVector2D Pos, int32 Seed)
+// ✅ ПРАВИЛЬНЫЕ НАЗВАНИЯ:
+// Height_Gameplay = для AI, physics, placement (terrain solid surface)
+// Height_Render   = для visual mesh (с river carving)
+
+float GetHeight_Gameplay(FVector2D Pos, int32 Seed)
 {
-    // Для collision, navigation, frequent queries
-    // НЕ включает реки - они визуальны, не влияют на геймплей
+    // Для collision, AI, placement, physics queries
+    // НЕ включает river carving — это высота "земли"
     return GetBaseHeight(Pos, Seed) + GetSettlementInfluence(Pos, Seed);
 }
 
-float GetHeight_Visual(FVector2D Pos, int32 Seed)
+float GetHeight_Render(FVector2D Pos, int32 Seed)
 {
-    // Для terrain mesh generation (редко)
-    return GetHeight_Fast(Pos, Seed) - GetRiverValleyInfluence_Cached(Pos, Seed);
+    // Для terrain mesh generation (однократно при baking)
+    // Включает river valley carving для визуала
+    return GetHeight_Gameplay(Pos, Seed) - GetRiverValleyInfluence_Cached(Pos, Seed);
 }
+```
 
-// Использование:
-// - Physics/Collision → GetHeight_Fast
-// - NavMesh → GetHeight_Fast
-// - PCG vegetation → GetHeight_Fast
-// - Terrain mesh → GetHeight_Visual (раз при генерации чанка)
+**⚠️ ВАЖНО: River water и collision — ОТДЕЛЬНЫЕ системы!**
+
+```
+Gameplay height игнорирует river carving, НО:
+
+1. River WATER SURFACE — отдельная плоскость (WaterBodyRiver actor)
+   → Игрок может плавать
+   → Collision = WaterBody volume, НЕ terrain height
+
+2. River COLLISION — отдельный volume для AI/pathfinding
+   → AI учитывает реки как барьер через Spatial Query
+   → НЕ через GetHeight_Gameplay()
+
+3. River BRIDGES — строятся НАД river valley
+   → Мост имеет свой collision mesh
+   → Мост НЕ модифицирует terrain height
+
+Схема:
+┌─────────────────────────────────────────────────────────┐
+│                                                         │
+│   GetHeight_Gameplay() ────────────────── (terrain)     │
+│                        ╲                                │
+│   GetHeight_Render() ─────────────── (visual with valley)│
+│                            ╲                            │
+│   WaterSurface ─────────────────────── (water plane)    │
+│   RiverCollision ───────────────────── (swimming zone)  │
+│                                                         │
+│   Мост строится на GetHeight_Gameplay(), НЕ Render!     │
+│                                                         │
+└─────────────────────────────────────────────────────────┘
+```
+
+**Использование:**
+```cpp
+// - Physics ground check  → GetHeight_Gameplay()
+// - AI slope calculation  → GetHeight_Gameplay()
+// - PCG tree placement    → GetHeight_Gameplay()
+// - Building foundation   → GetHeight_Gameplay()
+// - Terrain mesh baking   → GetHeight_Render() (однократно)
+// - Can player swim here? → WaterBody::IsInWater(Pos)
+// - AI avoids river?      → RiverSpatialQuery::IsBlocked(From, To)
 ```
 
 #### Решение 4: Spatial Index для сплайнов
@@ -2348,23 +2547,23 @@ public:
 │                    HEIGHT QUERIES                            │
 ├─────────────────────────────────────────────────────────────┤
 │                                                             │
-│  Частые (collision, nav, PCG):                              │
-│    GetHeight_Fast() - БЕЗ рек                               │
+│  Частые (collision, AI, PCG):                               │
+│    GetHeight_Gameplay() - terrain surface (БЕЗ river carving)│
 │    ~0.1 μs per query                                        │
 │                                                             │
-│  Редкие (terrain mesh):                                     │
-│    GetHeight_Visual() с River Tile Cache                    │
+│  Редкие (terrain mesh baking):                              │
+│    GetHeight_Render() с River Tile Cache                    │
 │    ~1 μs per query (после прогрева кэша)                    │
+│                                                             │
+│  River/Water interactions:                                  │
+│    WaterBody::IsInWater() - плавание                       │
+│    RiverSpatialQuery::IsBlocked() - AI барьеры             │
 │                                                             │
 │  River Tile Cache:                                          │
 │    - 64×64 тайлы, 2м resolution                            │
 │    - Precompute при первом обращении к тайлу               │
 │    - LRU eviction для памяти                               │
 │    - ~16 KB на тайл (4096 floats)                          │
-│                                                             │
-│  River Spline Cache:                                        │
-│    - Кэш сплайнов по ячейкам River Grid                    │
-│    - Spatial index для быстрого поиска сегментов           │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -2377,7 +2576,7 @@ public:
 | С кэшем сплайнов | ~50 μs | ~20,000 |
 | + Spatial index | ~10 μs | ~100,000 |
 | + Tile cache (8м) | ~0.5 μs | ~2,000,000 |
-| Height_Fast (без рек) | ~0.1 μs | ~10,000,000 |
+| GetHeight_Gameplay (без river carving) | ~0.1 μs | ~10,000,000 |
 
 ### Ширина реки (downstream = шире)
 
