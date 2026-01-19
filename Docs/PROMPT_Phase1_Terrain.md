@@ -30,7 +30,7 @@
 ### Ожидаемый результат
 
 1. Игрок спавнится в процедурном мире
-2. Terrain генерируется вокруг игрока (холмы, горы из Perlin noise)
+2. Terrain генерируется вокруг игрока (холмы, горы из Simplex noise)
 3. При движении — новые регионы подгружаются, старые выгружаются
 4. Один seed = один и тот же terrain (детерминизм)
 
@@ -72,7 +72,7 @@ ProceduralWorld/
 Реализуй `FHeightGenerator::BakeRegionHeight()`:
 - Input: RegionCoord, WorldSeed, Resolution (512)
 - Output: TArray<float> — высоты в метрах
-- Алгоритм: PerlinFBM (6 октав) + Domain Warping
+- Алгоритм: SimplexFBM (6 октав) + Domain Warping
 
 ### Шаг 3: Region Streaming
 

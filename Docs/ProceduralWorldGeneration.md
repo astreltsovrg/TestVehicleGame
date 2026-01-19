@@ -117,7 +117,7 @@ World Seed
           ├─ 1. BAKING PHASE (background thread):
           │     │
           │     ├─ ComputeBaseNoise() → R32_FLOAT texture
-          │     │     └─ PerlinFBM + Domain Warping
+          │     │     └─ SimplexFBM + Domain Warping
           │     │
           │     ├─ ComputeRivers() → modify height texture
           │     │     └─ Gradient descent, valley carving
@@ -851,7 +851,7 @@ float GetRiverValleyInfluence(FVector2D Pos, int32 Seed)
 ### Детерминированный сплайн реки
 
 > ⚠️ **Примечание**: Эта функция вызывается при **PREPROCESSING** региона, ДО baking текстуры.
-> Поэтому здесь допустимо вызывать PerlinFBM напрямую — текстура ещё не существует!
+> Поэтому здесь допустимо вызывать SimplexFBM напрямую — текстура ещё не существует!
 
 ```cpp
 // PREPROCESSING ONLY — вызывается при стриминге региона
@@ -906,7 +906,7 @@ float GetHeight(FVector2D Pos, int32 Seed)
 float GetBaseHeight_ForBaking(FVector2D Pos, int32 Seed)
 {
     // Только noise, без рек и поселений
-    return PerlinFBM(Pos, Seed);  // ← Вызывается ТОЛЬКО при baking региона!
+    return SimplexFBM(Pos, Seed);  // ← Вызывается ТОЛЬКО при baking региона!
 }
 
 float GetFinalHeight_ForBaking(FVector2D Pos, int32 Seed)
@@ -1591,7 +1591,7 @@ float SampleWithBorderBlend(FVector2D WorldPos, const TArray<FRegionDataTexture>
 │  BAKING PHASE (при стриминге региона):                       │
 │  GetFinalHeight_ForBaking(pos, seed)                         │
 │       │                                                      │
-│       ├── PerlinFBM(pos, seed) + Domain Warping              │
+│       ├── SimplexFBM(pos, seed) + Domain Warping              │
 │       ├── + GetSettlementInfluence(pos, seed)                │
 │       ├── - Region.GetRiverInfluence(pos) [pre-computed]     │
 │       └── → R32_FLOAT Texture (GPU + CPU mirror)             │
@@ -1602,7 +1602,7 @@ float SampleWithBorderBlend(FVector2D WorldPos, const TArray<FRegionDataTexture>
 └──────────────────────────────────────────────────────────────┘
 
 Ключевой инсайт (см. World Assumptions #3):
-- PerlinFBM вызывается ТОЛЬКО при baking региона
+- SimplexFBM вызывается ТОЛЬКО при baking региона
 - Runtime читает ТОЛЬКО из baked texture (O(1) lookup)
 - Rivers - глобальные (10+ км), preprocessing обязателен
 ```
@@ -2440,7 +2440,7 @@ struct FTerrainTile
 float BakeHeight_Gameplay(FVector2D Pos, int32 Seed)
 {
     // Запекается в HeightTexture_Gameplay
-    return PerlinFBM(Pos, Seed) + GetSettlementInfluence(Pos, Seed);
+    return SimplexFBM(Pos, Seed) + GetSettlementInfluence(Pos, Seed);
 }
 
 float BakeHeight_Render(FVector2D Pos, int32 Seed)

@@ -37,7 +37,7 @@ World Seed (int32)
           └─→ BAKING (async, background thread)
                 │
                 ├─ 1. Generate HeightTexture (512×512, R32_FLOAT)
-                │     └─ PerlinFBM(pos, seed) + Domain Warping
+                │     └─ SimplexFBM(pos, seed) + Domain Warping
                 │
                 └─ 2. Copy to CPU cache (для gameplay queries)
                       └─ HeightCache_CPU[]
@@ -201,16 +201,18 @@ private:
         // Domain warping для более органичных форм
         FVector2D WarpedPos = ApplyDomainWarping(Pos, Seed);
 
-        // Multi-octave Perlin noise
+        // Multi-octave Simplex noise (FBM)
+        // Примечание: UE5 FMath::PerlinNoise2D — можно заменить на Simplex реализацию
+        // для лучшего качества (меньше направленных артефактов)
         float Height = 0.f;
         float Amplitude = 1.f;
         float Frequency = 0.0005f;  // ~2км wavelength для основных гор
 
         for (int32 Octave = 0; Octave < 6; Octave++)
         {
-            float NoiseValue = FMath::PerlinNoise2D(
-                FVector2D(WarpedPos.X * Frequency + Seed * 0.1f,
-                         WarpedPos.Y * Frequency + Seed * 0.2f));
+            float NoiseValue = SimplexNoise2D(
+                WarpedPos.X * Frequency + Seed * 0.1f,
+                WarpedPos.Y * Frequency + Seed * 0.2f);
 
             Height += NoiseValue * Amplitude;
 
@@ -227,10 +229,8 @@ private:
         float WarpStrength = 200.f;
         float WarpFreq = 0.0003f;
 
-        float WarpX = FMath::PerlinNoise2D(
-            FVector2D(Pos.X * WarpFreq + Seed, Pos.Y * WarpFreq));
-        float WarpY = FMath::PerlinNoise2D(
-            FVector2D(Pos.X * WarpFreq, Pos.Y * WarpFreq + Seed));
+        float WarpX = SimplexNoise2D(Pos.X * WarpFreq + Seed, Pos.Y * WarpFreq);
+        float WarpY = SimplexNoise2D(Pos.X * WarpFreq, Pos.Y * WarpFreq + Seed);
 
         return Pos + FVector2D(WarpX, WarpY) * WarpStrength;
     }
@@ -331,7 +331,7 @@ void URegionManager::LoadRegion(FIntPoint Coord)
 5. ✅ Debug материал показывает форму terrain
 
 **Terrain выглядит как:**
-- Холмы и горы (Perlin noise)
+- Холмы и горы (Simplex noise)
 - Органичные формы (domain warping)
 - Однотонный/gradient цвет (debug визуализация)
 
