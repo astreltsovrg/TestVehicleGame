@@ -25,7 +25,8 @@ public class TestVehicleGame : ModuleRules
 			"GameplayAbilities",
 			"GameplayTags",
 			"GameplayTasks",
-			"AIModule"
+			"AIModule",
+			"Voxel"       // VoxelPlugin for procedural terrain
 		});
 
 		PublicIncludePaths.AddRange(new string[] {
@@ -36,7 +37,8 @@ public class TestVehicleGame : ModuleRules
 			"TestVehicleGame/Variant_TimeTrial",
 			"TestVehicleGame/Variant_TimeTrial/UI",
 			"TestVehicleGame/GAS",
-			"TestVehicleGame/AI"
+			"TestVehicleGame/AI",
+			"TestVehicleGame/ProceduralWorld"
 		});
 
 		PrivateDependencyModuleNames.AddRange(new string[] { });
